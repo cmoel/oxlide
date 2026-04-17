@@ -6,6 +6,18 @@ pub use ast::{
     Block, Cell, Directive, InlineSpan, ListItem, ParseError, Slide, SlideDeck, SourceSpan,
 };
 
+#[cfg(test)]
+fn directive_name(d: &Directive) -> &str {
+    let Directive::Raw { name, .. } = d;
+    name
+}
+
+#[cfg(test)]
+fn directive_args(d: &Directive) -> &str {
+    let Directive::Raw { args, .. } = d;
+    args
+}
+
 pub fn parse_deck(source: &str) -> Result<SlideDeck, ParseError> {
     let prepass_out = prepass::prepass(source);
     let mut deck = fold::fold(&prepass_out);
@@ -216,5 +228,140 @@ mod tests {
         let src = include_str!("fixtures/leading-trailing-rule.md");
         let d = deck(src);
         assert_eq!(d.slides.len(), 1);
+    }
+
+    #[test]
+    fn fixture_directive_on_slide() {
+        let src = include_str!("fixtures/directive-on-slide.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert_eq!(d.slides[0].directives.len(), 1);
+        assert_eq!(super::directive_name(&d.slides[0].directives[0]), "fx");
+        assert_eq!(
+            super::directive_args(&d.slides[0].directives[0]),
+            "fade duration=300"
+        );
+        for cell in &d.slides[0].cells {
+            assert!(cell.directives.is_empty());
+        }
+    }
+
+    #[test]
+    fn fixture_directive_on_cell() {
+        let src = include_str!("fixtures/directive-on-cell.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert!(d.slides[0].directives.is_empty());
+        let with_directive = d.slides[0]
+            .cells
+            .iter()
+            .find(|c| !c.directives.is_empty())
+            .expect("expected a cell with a directive");
+        assert_eq!(with_directive.directives.len(), 1);
+        assert_eq!(
+            super::directive_name(&with_directive.directives[0]),
+            "layout"
+        );
+        assert_eq!(
+            super::directive_args(&with_directive.directives[0]),
+            "title-ascii"
+        );
+    }
+
+    #[test]
+    fn fixture_directive_empty_args() {
+        let src = include_str!("fixtures/directive-empty-args.md");
+        let d = deck(src);
+        assert_eq!(d.slides[0].directives.len(), 1);
+        assert_eq!(super::directive_name(&d.slides[0].directives[0]), "fx");
+        assert_eq!(super::directive_args(&d.slides[0].directives[0]), "");
+    }
+
+    #[test]
+    fn fixture_directive_multiple_in_source_order() {
+        let src = include_str!("fixtures/directive-multiple.md");
+        let d = deck(src);
+        let all: Vec<&Directive> = d.slides[0]
+            .directives
+            .iter()
+            .chain(d.slides[0].cells.iter().flat_map(|c| c.directives.iter()))
+            .collect();
+        assert_eq!(all.len(), 2);
+        let names: Vec<&str> = all.iter().map(|d| super::directive_name(d)).collect();
+        assert_eq!(names, vec!["fx", "layout"]);
+    }
+
+    #[test]
+    fn fixture_non_oxlide_comment_ignored() {
+        let src = include_str!("fixtures/non-oxlide-comment-ignored.md");
+        let d = deck(src);
+        assert!(d.slides[0].directives.is_empty());
+        for cell in &d.slides[0].cells {
+            assert!(cell.directives.is_empty());
+        }
+    }
+
+    #[test]
+    fn fixture_internal_sentinel_not_leaked() {
+        let src = include_str!("fixtures/internal-sentinel-not-leaked.md");
+        let d = deck(src);
+        assert!(d.slides[0].directives.is_empty());
+        for cell in &d.slides[0].cells {
+            assert!(cell.directives.is_empty());
+        }
+    }
+
+    #[test]
+    fn fixture_directive_whitespace_tolerance() {
+        let src = include_str!("fixtures/directive-whitespace-tolerance.md");
+        let d = deck(src);
+        let all: Vec<&Directive> = d.slides[0]
+            .directives
+            .iter()
+            .chain(d.slides[0].cells.iter().flat_map(|c| c.directives.iter()))
+            .collect();
+        assert_eq!(all.len(), 2);
+        for directive in &all {
+            assert_eq!(super::directive_name(directive), "fx");
+            assert_eq!(super::directive_args(directive), "fade");
+        }
+    }
+
+    #[test]
+    fn fixture_directive_with_hyphens() {
+        let src = include_str!("fixtures/directive-with-hyphens.md");
+        let d = deck(src);
+        assert_eq!(d.slides[0].directives.len(), 1);
+        assert_eq!(
+            super::directive_name(&d.slides[0].directives[0]),
+            "image-meta-disable"
+        );
+        assert_eq!(super::directive_args(&d.slides[0].directives[0]), "true");
+    }
+
+    #[test]
+    fn directive_span_points_into_original_source() {
+        let src = "<!-- oxlide-fx: fade -->\n\n# Slide";
+        let d = deck(src);
+        let dir = &d.slides[0].directives[0];
+        let Directive::Raw { span, .. } = dir;
+        let slice = &src[span.start..span.end];
+        assert!(
+            slice.contains("oxlide-fx"),
+            "expected span to cover comment, got {:?}",
+            slice
+        );
+    }
+
+    #[test]
+    fn slide_break_sentinel_does_not_appear_as_directive() {
+        let d = deck("# A\n\n\n\n# B");
+        assert_eq!(d.slides.len(), 2);
+        for slide in &d.slides {
+            assert!(slide.directives.is_empty());
+            for cell in &slide.cells {
+                assert!(cell.directives.is_empty());
+            }
+        }
     }
 }

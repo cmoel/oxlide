@@ -1,7 +1,36 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::ast::{Block, Cell, InlineSpan, ListItem, Slide, SlideDeck, SourceSpan};
+use super::ast::{Block, Cell, Directive, InlineSpan, ListItem, Slide, SlideDeck, SourceSpan};
 use super::prepass::{PrepassOutput, SLIDE_BREAK_SENTINEL, rewritten_to_original};
+
+fn parse_oxlide_comment(text: &str) -> Option<(String, String)> {
+    let trimmed = text.trim();
+    let inner = trimmed.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let after_prefix = inner.strip_prefix("oxlide-")?;
+    let colon_pos = after_prefix.find(':')?;
+    let name = &after_prefix[..colon_pos];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let args = after_prefix[colon_pos + 1..].trim().to_string();
+    Some((name.to_string(), args))
+}
+
+fn is_internal_sentinel(name: &str) -> bool {
+    matches!(
+        name,
+        "visible-start"
+            | "visible-end"
+            | "notes-start"
+            | "notes-end"
+            | "image-meta"
+            | "slide-break"
+    )
+}
 
 enum Builder {
     Paragraph {
@@ -111,31 +140,41 @@ fn append_text(stack: &mut [Builder], text: &str, range_start: usize, range_end:
     }
 }
 
-fn flush_cell(cell_blocks: &mut Vec<Block>, cells: &mut Vec<Cell>) {
+fn flush_cell(
+    cell_blocks: &mut Vec<Block>,
+    cells: &mut Vec<Cell>,
+    pending_cell_directives: &mut Vec<Directive>,
+) {
     if cell_blocks.is_empty() {
         return;
     }
     let start = cell_blocks[0].span().start;
     let end = cell_blocks.last().unwrap().span().end;
     let taken = std::mem::take(cell_blocks);
+    let directives = std::mem::take(pending_cell_directives);
     cells.push(Cell {
         blocks: taken,
-        directives: Vec::new(),
+        directives,
         span: SourceSpan { start, end },
     });
 }
 
-fn flush_slide(cells: &mut Vec<Cell>, slides: &mut Vec<Slide>) {
+fn flush_slide(
+    cells: &mut Vec<Cell>,
+    slides: &mut Vec<Slide>,
+    pending_slide_directives: &mut Vec<Directive>,
+) {
     if cells.is_empty() {
         return;
     }
     let start = cells[0].span.start;
     let end = cells.last().unwrap().span.end;
     let taken = std::mem::take(cells);
+    let directives = std::mem::take(pending_slide_directives);
     slides.push(Slide {
         cells: taken,
         notes: Vec::new(),
-        directives: Vec::new(),
+        directives,
         span: SourceSpan { start, end },
     });
 }
@@ -149,20 +188,64 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
     let mut current_cell_blocks: Vec<Block> = Vec::new();
     let mut current_slide_cells: Vec<Cell> = Vec::new();
     let mut slides: Vec<Slide> = Vec::new();
+    let mut pending_cell_directives: Vec<Directive> = Vec::new();
+    let mut pending_slide_directives: Vec<Directive> = Vec::new();
 
     for (event, range) in parser.into_offset_iter() {
         match event {
             Event::Rule => {
-                flush_cell(&mut current_cell_blocks, &mut current_slide_cells);
-                flush_slide(&mut current_slide_cells, &mut slides);
+                flush_cell(
+                    &mut current_cell_blocks,
+                    &mut current_slide_cells,
+                    &mut pending_cell_directives,
+                );
+                flush_slide(
+                    &mut current_slide_cells,
+                    &mut slides,
+                    &mut pending_slide_directives,
+                );
             }
-            Event::Html(ref s) | Event::InlineHtml(ref s) if s.trim() == SLIDE_BREAK_SENTINEL => {
-                flush_cell(&mut current_cell_blocks, &mut current_slide_cells);
-                flush_slide(&mut current_slide_cells, &mut slides);
+            Event::Html(s) | Event::InlineHtml(s) => {
+                let text = s.as_ref();
+                if text.trim() == SLIDE_BREAK_SENTINEL {
+                    flush_cell(
+                        &mut current_cell_blocks,
+                        &mut current_slide_cells,
+                        &mut pending_cell_directives,
+                    );
+                    flush_slide(
+                        &mut current_slide_cells,
+                        &mut slides,
+                        &mut pending_slide_directives,
+                    );
+                } else if let Some((name, args)) = parse_oxlide_comment(text)
+                    && !is_internal_sentinel(&name)
+                {
+                    let directive = Directive::Raw {
+                        name,
+                        args,
+                        span: SourceSpan {
+                            start: map(range.start),
+                            end: map(range.end),
+                        },
+                    };
+                    if !stack.is_empty() || !current_cell_blocks.is_empty() {
+                        pending_cell_directives.push(directive);
+                    } else {
+                        pending_slide_directives.push(directive);
+                    }
+                }
             }
             Event::Start(tag) => {
+                if matches!(tag, Tag::HtmlBlock) {
+                    continue;
+                }
                 if stack.is_empty() && !current_cell_blocks.is_empty() {
-                    flush_cell(&mut current_cell_blocks, &mut current_slide_cells);
+                    flush_cell(
+                        &mut current_cell_blocks,
+                        &mut current_slide_cells,
+                        &mut pending_cell_directives,
+                    );
                 }
                 let start_rw = range.start;
                 let builder = match tag {
@@ -190,6 +273,9 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                 stack.push(builder);
             }
             Event::End(tag_end) => {
+                if matches!(tag_end, TagEnd::HtmlBlock) {
+                    continue;
+                }
                 let Some(builder) = stack.pop() else {
                     continue;
                 };
@@ -286,8 +372,16 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
         }
     }
 
-    flush_cell(&mut current_cell_blocks, &mut current_slide_cells);
-    flush_slide(&mut current_slide_cells, &mut slides);
+    flush_cell(
+        &mut current_cell_blocks,
+        &mut current_slide_cells,
+        &mut pending_cell_directives,
+    );
+    flush_slide(
+        &mut current_slide_cells,
+        &mut slides,
+        &mut pending_slide_directives,
+    );
 
     SlideDeck {
         slides,
