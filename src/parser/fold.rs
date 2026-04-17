@@ -35,12 +35,12 @@ fn is_internal_sentinel(name: &str) -> bool {
 enum Builder {
     Paragraph {
         start_rw: usize,
-        text: String,
+        spans: Vec<InlineSpan>,
     },
     Heading {
         level: u8,
         start_rw: usize,
-        text: String,
+        spans: Vec<InlineSpan>,
     },
     List {
         ordered: bool,
@@ -50,15 +50,25 @@ enum Builder {
     Item {
         start_rw: usize,
         blocks: Vec<Block>,
-        pending_text: Option<PendingText>,
+        pending: Option<PendingInline>,
+    },
+    Strong {
+        spans: Vec<InlineSpan>,
+    },
+    Emphasis {
+        spans: Vec<InlineSpan>,
+    },
+    Link {
+        url: String,
+        spans: Vec<InlineSpan>,
     },
     Unhandled,
 }
 
-struct PendingText {
+struct PendingInline {
     start_rw: usize,
     end_rw: usize,
-    text: String,
+    spans: Vec<InlineSpan>,
 }
 
 fn heading_level_to_u8(level: HeadingLevel) -> u8 {
@@ -72,14 +82,6 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
     }
 }
 
-fn spans_from_text(text: String) -> Vec<InlineSpan> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        vec![InlineSpan::Text(text)]
-    }
-}
-
 fn push_block_into_parent(
     stack: &mut [Builder],
     block: Block,
@@ -87,13 +89,11 @@ fn push_block_into_parent(
 ) {
     match stack.last_mut() {
         Some(Builder::Item {
-            blocks,
-            pending_text,
-            ..
+            blocks, pending, ..
         }) => {
-            if let Some(pt) = pending_text.take() {
+            if let Some(pt) = pending.take() {
                 blocks.push(Block::Paragraph {
-                    spans: spans_from_text(pt.text),
+                    spans: pt.spans,
                     span: SourceSpan {
                         start: pt.start_rw,
                         end: pt.end_rw,
@@ -112,31 +112,50 @@ fn push_block_into_parent(
     }
 }
 
-fn append_text(stack: &mut [Builder], text: &str, range_start: usize, range_end: usize) {
+fn inline_container(
+    stack: &mut [Builder],
+    range_start: usize,
+    range_end: usize,
+) -> Option<&mut Vec<InlineSpan>> {
     for builder in stack.iter_mut().rev() {
         match builder {
-            Builder::Paragraph { text: buf, .. } | Builder::Heading { text: buf, .. } => {
-                buf.push_str(text);
-                return;
-            }
-            Builder::Item { pending_text, .. } => {
-                match pending_text {
-                    Some(pt) => {
-                        pt.text.push_str(text);
-                        pt.end_rw = range_end;
-                    }
-                    None => {
-                        *pending_text = Some(PendingText {
-                            start_rw: range_start,
-                            end_rw: range_end,
-                            text: text.to_string(),
-                        });
-                    }
-                }
-                return;
+            Builder::Paragraph { spans, .. }
+            | Builder::Heading { spans, .. }
+            | Builder::Strong { spans }
+            | Builder::Emphasis { spans }
+            | Builder::Link { spans, .. } => return Some(spans),
+            Builder::Item { pending, .. } => {
+                let pt = pending.get_or_insert_with(|| PendingInline {
+                    start_rw: range_start,
+                    end_rw: range_end,
+                    spans: Vec::new(),
+                });
+                pt.end_rw = range_end;
+                return Some(&mut pt.spans);
             }
             Builder::List { .. } | Builder::Unhandled => continue,
         }
+    }
+    None
+}
+
+fn push_inline(
+    stack: &mut [Builder],
+    span: InlineSpan,
+    range_start: usize,
+    range_end: usize,
+) {
+    let Some(container) = inline_container(stack, range_start, range_end) else {
+        return;
+    };
+    if let InlineSpan::Text(text) = span {
+        if let Some(InlineSpan::Text(last)) = container.last_mut() {
+            last.push_str(&text);
+        } else {
+            container.push(InlineSpan::Text(text));
+        }
+    } else {
+        container.push(span);
     }
 }
 
@@ -251,12 +270,12 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                 let builder = match tag {
                     Tag::Paragraph => Builder::Paragraph {
                         start_rw,
-                        text: String::new(),
+                        spans: Vec::new(),
                     },
                     Tag::Heading { level, .. } => Builder::Heading {
                         level: heading_level_to_u8(level),
                         start_rw,
-                        text: String::new(),
+                        spans: Vec::new(),
                     },
                     Tag::List(start_num) => Builder::List {
                         ordered: start_num.is_some(),
@@ -266,7 +285,13 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                     Tag::Item => Builder::Item {
                         start_rw,
                         blocks: Vec::new(),
-                        pending_text: None,
+                        pending: None,
+                    },
+                    Tag::Strong => Builder::Strong { spans: Vec::new() },
+                    Tag::Emphasis => Builder::Emphasis { spans: Vec::new() },
+                    Tag::Link { dest_url, .. } => Builder::Link {
+                        url: dest_url.into_string(),
+                        spans: Vec::new(),
                     },
                     _ => Builder::Unhandled,
                 };
@@ -281,9 +306,9 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                 };
                 let end_original = map(range.end);
                 match (builder, tag_end) {
-                    (Builder::Paragraph { start_rw, text }, TagEnd::Paragraph) => {
+                    (Builder::Paragraph { start_rw, spans }, TagEnd::Paragraph) => {
                         let block = Block::Paragraph {
-                            spans: spans_from_text(text),
+                            spans,
                             span: SourceSpan {
                                 start: map(start_rw),
                                 end: end_original,
@@ -295,13 +320,13 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         Builder::Heading {
                             level,
                             start_rw,
-                            text,
+                            spans,
                         },
                         TagEnd::Heading(_),
                     ) => {
                         let block = Block::Heading {
                             level,
-                            spans: spans_from_text(text),
+                            spans,
                             span: SourceSpan {
                                 start: map(start_rw),
                                 end: end_original,
@@ -331,13 +356,13 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         Builder::Item {
                             start_rw,
                             mut blocks,
-                            pending_text,
+                            pending,
                         },
                         TagEnd::Item,
                     ) => {
-                        if let Some(pt) = pending_text {
+                        if let Some(pt) = pending {
                             blocks.push(Block::Paragraph {
-                                spans: spans_from_text(pt.text),
+                                spans: pt.spans,
                                 span: SourceSpan {
                                     start: map(pt.start_rw),
                                     end: map(pt.end_rw),
@@ -355,18 +380,65 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                             items.push(item);
                         }
                     }
+                    (Builder::Strong { spans }, TagEnd::Strong) => {
+                        push_inline(
+                            &mut stack,
+                            InlineSpan::Strong(spans),
+                            range.start,
+                            range.end,
+                        );
+                    }
+                    (Builder::Emphasis { spans }, TagEnd::Emphasis) => {
+                        push_inline(
+                            &mut stack,
+                            InlineSpan::Emphasis(spans),
+                            range.start,
+                            range.end,
+                        );
+                    }
+                    (Builder::Link { url, spans }, TagEnd::Link) => {
+                        push_inline(
+                            &mut stack,
+                            InlineSpan::Link { url, text: spans },
+                            range.start,
+                            range.end,
+                        );
+                    }
                     (Builder::Unhandled, _) => {}
                     _ => {}
                 }
             }
             Event::Text(s) => {
-                append_text(&mut stack, &s, range.start, range.end);
+                push_inline(
+                    &mut stack,
+                    InlineSpan::Text(s.into_string()),
+                    range.start,
+                    range.end,
+                );
+            }
+            Event::Code(s) => {
+                push_inline(
+                    &mut stack,
+                    InlineSpan::Code(s.into_string()),
+                    range.start,
+                    range.end,
+                );
             }
             Event::SoftBreak => {
-                append_text(&mut stack, " ", range.start, range.end);
+                push_inline(
+                    &mut stack,
+                    InlineSpan::Text(" ".to_string()),
+                    range.start,
+                    range.end,
+                );
             }
             Event::HardBreak => {
-                append_text(&mut stack, "\n", range.start, range.end);
+                push_inline(
+                    &mut stack,
+                    InlineSpan::Text("\n".to_string()),
+                    range.start,
+                    range.end,
+                );
             }
             _ => {}
         }

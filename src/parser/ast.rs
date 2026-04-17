@@ -7,6 +7,13 @@ pub struct SourceSpan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InlineSpan {
     Text(String),
+    Strong(Vec<InlineSpan>),
+    Emphasis(Vec<InlineSpan>),
+    Code(String),
+    Link {
+        url: String,
+        text: Vec<InlineSpan>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

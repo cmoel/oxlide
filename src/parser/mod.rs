@@ -353,6 +353,171 @@ mod tests {
         );
     }
 
+    fn first_paragraph_spans(d: &SlideDeck) -> &[InlineSpan] {
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Paragraph { spans, .. } => spans,
+            other => panic!("expected first block to be paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_inline_bold() {
+        let src = include_str!("fixtures/inline-bold.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Strong(vec![InlineSpan::Text("hello".into())])]
+        );
+    }
+
+    #[test]
+    fn fixture_inline_italic() {
+        let src = include_str!("fixtures/inline-italic.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Emphasis(vec![InlineSpan::Text("italic".into())])]
+        );
+    }
+
+    #[test]
+    fn fixture_inline_code() {
+        let src = include_str!("fixtures/inline-code.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[
+                InlineSpan::Text("plain ".into()),
+                InlineSpan::Code("code".into()),
+                InlineSpan::Text(" here".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fixture_inline_link() {
+        let src = include_str!("fixtures/inline-link.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Link {
+                url: "https://x.com".into(),
+                text: vec![InlineSpan::Text("click".into())],
+            }]
+        );
+    }
+
+    #[test]
+    fn fixture_nested_bold_italic() {
+        let src = include_str!("fixtures/nested-bold-italic.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Strong(vec![InlineSpan::Emphasis(vec![
+                InlineSpan::Text("a".into())
+            ])])]
+        );
+    }
+
+    #[test]
+    fn fixture_autolink() {
+        let src = include_str!("fixtures/autolink.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Link {
+                url: "https://example.com".into(),
+                text: vec![InlineSpan::Text("https://example.com".into())],
+            }]
+        );
+    }
+
+    #[test]
+    fn fixture_link_with_code_text() {
+        let src = include_str!("fixtures/link-with-code-text.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[InlineSpan::Link {
+                url: "https://x.com".into(),
+                text: vec![InlineSpan::Code("code".into())],
+            }]
+        );
+    }
+
+    #[test]
+    fn fixture_hard_break() {
+        let src = include_str!("fixtures/hard-break.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(spans, &[InlineSpan::Text("foo\nbar".into())]);
+    }
+
+    #[test]
+    fn fixture_soft_break_coalesced() {
+        let src = include_str!("fixtures/soft-break-coalesced.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(spans, &[InlineSpan::Text("foo bar".into())]);
+    }
+
+    #[test]
+    fn fixture_adjacent_text_coalesced() {
+        let src = include_str!("fixtures/adjacent-text-coalesced.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(spans, &[InlineSpan::Text("foo*bar".into())]);
+    }
+
+    #[test]
+    fn heading_preserves_inline_spans() {
+        let d = deck("## **bold** heading");
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Heading { level, spans, .. } => {
+                assert_eq!(*level, 2);
+                assert_eq!(
+                    spans,
+                    &[
+                        InlineSpan::Strong(vec![InlineSpan::Text("bold".into())]),
+                        InlineSpan::Text(" heading".into()),
+                    ]
+                );
+            }
+            other => panic!("expected heading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn list_item_preserves_inline_spans() {
+        let d = deck("- plain `code` text");
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::List { items, .. } => {
+                let item = &items[0];
+                match &item.blocks[0] {
+                    Block::Paragraph { spans, .. } => {
+                        assert_eq!(
+                            spans,
+                            &[
+                                InlineSpan::Text("plain ".into()),
+                                InlineSpan::Code("code".into()),
+                                InlineSpan::Text(" text".into()),
+                            ]
+                        );
+                    }
+                    other => panic!("expected paragraph in item, got {:?}", other),
+                }
+            }
+            other => panic!("expected list, got {:?}", other),
+        }
+    }
+
     #[test]
     fn slide_break_sentinel_does_not_appear_as_directive() {
         let d = deck("# A\n\n\n\n# B");
