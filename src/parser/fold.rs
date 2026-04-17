@@ -62,7 +62,29 @@ enum Builder {
         url: String,
         spans: Vec<InlineSpan>,
     },
+    Image {
+        url: String,
+        spans: Vec<InlineSpan>,
+    },
     Unhandled,
+}
+
+fn flatten_inline_to_string(spans: &[InlineSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        match span {
+            InlineSpan::Text(s) => out.push_str(s),
+            InlineSpan::Code(s) => out.push_str(s),
+            InlineSpan::Strong(inner) | InlineSpan::Emphasis(inner) => {
+                out.push_str(&flatten_inline_to_string(inner));
+            }
+            InlineSpan::Link { text, .. } => {
+                out.push_str(&flatten_inline_to_string(text));
+            }
+            InlineSpan::Image { alt, .. } => out.push_str(alt),
+        }
+    }
+    out
 }
 
 struct PendingInline {
@@ -123,7 +145,8 @@ fn inline_container(
             | Builder::Heading { spans, .. }
             | Builder::Strong { spans }
             | Builder::Emphasis { spans }
-            | Builder::Link { spans, .. } => return Some(spans),
+            | Builder::Link { spans, .. }
+            | Builder::Image { spans, .. } => return Some(spans),
             Builder::Item { pending, .. } => {
                 let pt = pending.get_or_insert_with(|| PendingInline {
                     start_rw: range_start,
@@ -293,6 +316,10 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         url: dest_url.into_string(),
                         spans: Vec::new(),
                     },
+                    Tag::Image { dest_url, .. } => Builder::Image {
+                        url: dest_url.into_string(),
+                        spans: Vec::new(),
+                    },
                     _ => Builder::Unhandled,
                 };
                 stack.push(builder);
@@ -307,12 +334,20 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                 let end_original = map(range.end);
                 match (builder, tag_end) {
                     (Builder::Paragraph { start_rw, spans }, TagEnd::Paragraph) => {
-                        let block = Block::Paragraph {
-                            spans,
-                            span: SourceSpan {
-                                start: map(start_rw),
-                                end: end_original,
-                            },
+                        let span = SourceSpan {
+                            start: map(start_rw),
+                            end: end_original,
+                        };
+                        let block = if spans.len() == 1
+                            && matches!(spans[0], InlineSpan::Image { .. })
+                        {
+                            let Some(InlineSpan::Image { src, alt }) = spans.into_iter().next()
+                            else {
+                                unreachable!()
+                            };
+                            Block::Image { src, alt, span }
+                        } else {
+                            Block::Paragraph { spans, span }
                         };
                         push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
                     }
@@ -400,6 +435,15 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         push_inline(
                             &mut stack,
                             InlineSpan::Link { url, text: spans },
+                            range.start,
+                            range.end,
+                        );
+                    }
+                    (Builder::Image { url, spans }, TagEnd::Image) => {
+                        let alt = flatten_inline_to_string(&spans);
+                        push_inline(
+                            &mut stack,
+                            InlineSpan::Image { src: url, alt },
                             range.start,
                             range.end,
                         );

@@ -14,6 +14,10 @@ pub enum InlineSpan {
         url: String,
         text: Vec<InlineSpan>,
     },
+    Image {
+        src: String,
+        alt: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +42,11 @@ pub enum Block {
         items: Vec<ListItem>,
         span: SourceSpan,
     },
+    Image {
+        src: String,
+        alt: String,
+        span: SourceSpan,
+    },
 }
 
 impl Block {
@@ -46,6 +55,7 @@ impl Block {
             Block::Paragraph { span, .. } => *span,
             Block::Heading { span, .. } => *span,
             Block::List { span, .. } => *span,
+            Block::Image { span, .. } => *span,
         }
     }
 }

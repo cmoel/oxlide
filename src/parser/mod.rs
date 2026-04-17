@@ -477,6 +477,126 @@ mod tests {
     }
 
     #[test]
+    fn fixture_block_image() {
+        let src = include_str!("fixtures/block-image.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { src, alt, .. } => {
+                assert_eq!(src, "logo.png");
+                assert_eq!(alt, "logo");
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_inline_image() {
+        let src = include_str!("fixtures/inline-image.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[
+                InlineSpan::Text("Look at ".into()),
+                InlineSpan::Image {
+                    src: "pic.png".into(),
+                    alt: "this".into(),
+                },
+                InlineSpan::Text(" thing".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fixture_image_no_alt() {
+        let src = include_str!("fixtures/image-no-alt.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { src, alt, .. } => {
+                assert_eq!(src, "logo.png");
+                assert_eq!(alt, "");
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_image_with_title_ignored() {
+        let src = include_str!("fixtures/image-with-title-ignored.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { src, alt, .. } => {
+                assert_eq!(src, "path.png");
+                assert_eq!(alt, "alt");
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_multiple_images_inline() {
+        let src = include_str!("fixtures/multiple-images-inline.md");
+        let d = deck(src);
+        let spans = first_paragraph_spans(&d);
+        assert_eq!(
+            spans,
+            &[
+                InlineSpan::Image {
+                    src: "a.png".into(),
+                    alt: "a".into(),
+                },
+                InlineSpan::Text(" ".into()),
+                InlineSpan::Image {
+                    src: "b.png".into(),
+                    alt: "b".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn fixture_image_in_heading() {
+        let src = include_str!("fixtures/image-in-heading.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Heading { level, spans, .. } => {
+                assert_eq!(*level, 1);
+                assert_eq!(
+                    spans,
+                    &[
+                        InlineSpan::Text("Title ".into()),
+                        InlineSpan::Image {
+                            src: "logo.png".into(),
+                            alt: "logo".into(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("expected heading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_image_with_surrounding_whitespace_stays_paragraph() {
+        let src = include_str!("fixtures/image-with-surrounding-whitespace-stays-paragraph.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Paragraph { spans, .. } => {
+                let has_image = spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Image { .. }));
+                assert!(has_image, "expected an inline image span");
+                assert!(
+                    spans.len() > 1,
+                    "expected paragraph to have multiple spans, got {:?}",
+                    spans
+                );
+            }
+            other => panic!("expected Block::Paragraph (not promoted), got {:?}", other),
+        }
+    }
+
+    #[test]
     fn heading_preserves_inline_spans() {
         let d = deck("## **bold** heading");
         match &d.slides[0].cells[0].blocks[0] {
