@@ -1,7 +1,8 @@
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use super::ast::{
-    Block, Cell, Directive, ImageMeta, InlineSpan, ListItem, Slide, SlideDeck, SourceSpan,
+    Block, Cell, Directive, ImageMeta, InlineSpan, ListItem, ParseError, Slide, SlideDeck,
+    SourceSpan,
 };
 use super::prepass::{
     IMAGE_META_SENTINEL_NAME, PrepassOutput, SLIDE_BREAK_SENTINEL, entry_containing,
@@ -71,7 +72,20 @@ enum Builder {
         url: String,
         spans: Vec<InlineSpan>,
     },
+    CodeBlock {
+        start_rw: usize,
+        lang: Option<String>,
+        source: String,
+    },
     Unhandled,
+}
+
+fn parse_code_lang(info: &str) -> Option<String> {
+    let token: String = info
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ',')
+        .collect();
+    if token.is_empty() { None } else { Some(token) }
 }
 
 fn flatten_inline_to_string(spans: &[InlineSpan]) -> String {
@@ -161,7 +175,7 @@ fn inline_container(
                 pt.end_rw = range_end;
                 return Some(&mut pt.spans);
             }
-            Builder::List { .. } | Builder::Unhandled => continue,
+            Builder::List { .. } | Builder::CodeBlock { .. } | Builder::Unhandled => continue,
         }
     }
     None
@@ -226,7 +240,7 @@ fn flush_slide(
     });
 }
 
-pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
+pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
     let parser = Parser::new_ext(&prepass_out.rewritten, Options::empty());
     let entries = &prepass_out.entries;
     let map = |rw: usize| rewritten_to_original(rw, entries);
@@ -335,6 +349,19 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         url: dest_url.into_string(),
                         spans: Vec::new(),
                     },
+                    Tag::CodeBlock(CodeBlockKind::Fenced(info)) => Builder::CodeBlock {
+                        start_rw,
+                        lang: parse_code_lang(info.as_ref()),
+                        source: String::new(),
+                    },
+                    Tag::CodeBlock(CodeBlockKind::Indented) => {
+                        return Err(ParseError::UnsupportedIndentedCodeBlock {
+                            span: SourceSpan {
+                                start: map(range.start),
+                                end: map(range.end),
+                            },
+                        });
+                    }
                     _ => Builder::Unhandled,
                 };
                 stack.push(builder);
@@ -468,17 +495,39 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                             range.end,
                         );
                     }
+                    (
+                        Builder::CodeBlock {
+                            start_rw,
+                            lang,
+                            source,
+                        },
+                        TagEnd::CodeBlock,
+                    ) => {
+                        let block = Block::CodeBlock {
+                            lang,
+                            source,
+                            span: SourceSpan {
+                                start: map(start_rw),
+                                end: end_original,
+                            },
+                        };
+                        push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                    }
                     (Builder::Unhandled, _) => {}
                     _ => {}
                 }
             }
             Event::Text(s) => {
-                push_inline(
-                    &mut stack,
-                    InlineSpan::Text(s.into_string()),
-                    range.start,
-                    range.end,
-                );
+                if let Some(Builder::CodeBlock { source, .. }) = stack.last_mut() {
+                    source.push_str(s.as_ref());
+                } else {
+                    push_inline(
+                        &mut stack,
+                        InlineSpan::Text(s.into_string()),
+                        range.start,
+                        range.end,
+                    );
+                }
             }
             Event::Code(s) => {
                 push_inline(
@@ -519,10 +568,10 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
         &mut pending_slide_directives,
     );
 
-    SlideDeck {
+    Ok(SlideDeck {
         slides,
         source: String::new(),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -531,7 +580,7 @@ mod tests {
     use super::*;
 
     fn fold_source(source: &str) -> SlideDeck {
-        fold(&prepass(source).unwrap())
+        fold(&prepass(source).unwrap()).unwrap()
     }
 
     #[test]

@@ -21,7 +21,7 @@ fn directive_args(d: &Directive) -> &str {
 
 pub fn parse_deck(source: &str) -> Result<SlideDeck, ParseError> {
     let prepass_out = prepass::prepass(source)?;
-    let mut deck = fold::fold(&prepass_out);
+    let mut deck = fold::fold(&prepass_out)?;
     deck.source = source.to_string();
     Ok(deck)
 }
@@ -712,6 +712,7 @@ mod tests {
                 assert_eq!(key, "opacity");
                 assert_eq!(value, "1.5");
             }
+            other => panic!("expected InvalidImageMeta, got {:?}", other),
         }
     }
 
@@ -741,6 +742,95 @@ mod tests {
             }
             other => panic!("expected Block::Image, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn fixture_code_with_lang() {
+        let src = include_str!("fixtures/code-with-lang.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { lang, source, span } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(source, "fn main() {}\n");
+                let slice = &src[span.start..span.end];
+                assert!(slice.starts_with("```rust"), "span should start at opening fence, got {:?}", slice);
+                assert!(slice.contains("```\n") || slice.ends_with("```"), "span should cover closing fence, got {:?}", slice);
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_code_no_lang() {
+        let src = include_str!("fixtures/code-no-lang.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { lang, source, .. } => {
+                assert!(lang.is_none());
+                assert_eq!(source, "plain text\n");
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_empty_code() {
+        let src = include_str!("fixtures/empty-code.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { lang, source, .. } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(source, "");
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_code_with_metadata_suffix() {
+        let src = include_str!("fixtures/code-with-metadata-suffix.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { lang, source, .. } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(source, "fn main() {}\n");
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_tilde_fences() {
+        let src = include_str!("fixtures/tilde-fences.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { lang, source, .. } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(source, "fn main() {}\n");
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_code_with_blank_lines_inside() {
+        let src = include_str!("fixtures/code-with-blank-lines-inside.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1, "blank line and --- inside fence must not split slides");
+        assert_eq!(d.slides[0].cells.len(), 1);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::CodeBlock { source, .. } => {
+                assert_eq!(source, "line 1\n\nline 3\n---\nline 5\n");
+            }
+            other => panic!("expected Block::CodeBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_indented_block_errors() {
+        let src = include_str!("fixtures/indented-block-errors.md");
+        let err = parse_deck(src).expect_err("indented code block should error");
+        assert!(matches!(err, ParseError::UnsupportedIndentedCodeBlock { .. }));
     }
 
     #[test]

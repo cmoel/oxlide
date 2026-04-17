@@ -81,6 +81,11 @@ pub enum Block {
         meta: Option<ImageMeta>,
         span: SourceSpan,
     },
+    CodeBlock {
+        lang: Option<String>,
+        source: String,
+        span: SourceSpan,
+    },
 }
 
 impl Block {
@@ -90,6 +95,7 @@ impl Block {
             Block::Heading { span, .. } => *span,
             Block::List { span, .. } => *span,
             Block::Image { span, .. } => *span,
+            Block::CodeBlock { span, .. } => *span,
         }
     }
 }
@@ -131,6 +137,9 @@ pub enum ParseError {
         key: String,
         value: String,
     },
+    UnsupportedIndentedCodeBlock {
+        span: SourceSpan,
+    },
 }
 
 impl std::fmt::Display for ParseError {
@@ -140,6 +149,11 @@ impl std::fmt::Display for ParseError {
                 f,
                 "invalid image metadata at {}..{}: {}={}",
                 span.start, span.end, key, value
+            ),
+            ParseError::UnsupportedIndentedCodeBlock { span } => write!(
+                f,
+                "indented (4-space) code blocks are not supported at {}..{}; use a fenced code block (```) instead",
+                span.start, span.end
             ),
         }
     }
