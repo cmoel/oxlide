@@ -1,1 +1,1 @@
-Just a single paragraph, nothing else.
+	Just a single paragraph, nothing else.

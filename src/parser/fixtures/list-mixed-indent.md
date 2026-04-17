@@ -1,0 +1,4 @@
+	- visible item one
+	- visible item two
+- notes item three
+- notes item four

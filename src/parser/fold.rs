@@ -5,8 +5,8 @@ use super::ast::{
     SourceSpan,
 };
 use super::prepass::{
-    IMAGE_META_SENTINEL_NAME, PrepassOutput, SLIDE_BREAK_SENTINEL, entry_containing,
-    rewritten_to_original,
+    NOTES_END_SENTINEL, NOTES_START_SENTINEL, PrepassOutput, SLIDE_BREAK_SENTINEL,
+    VISIBLE_END_SENTINEL, VISIBLE_START_SENTINEL, entry_containing, rewritten_to_original,
 };
 
 fn parse_oxlide_comment(text: &str) -> Option<(String, String)> {
@@ -126,7 +126,7 @@ fn heading_level_to_u8(level: HeadingLevel) -> u8 {
 fn push_block_into_parent(
     stack: &mut [Builder],
     block: Block,
-    current_cell_blocks: &mut Vec<Block>,
+    top_level_blocks: &mut Vec<Block>,
 ) {
     match stack.last_mut() {
         Some(Builder::Item {
@@ -148,7 +148,7 @@ fn push_block_into_parent(
             // drop to avoid corrupting structure.
         }
         None => {
-            current_cell_blocks.push(block);
+            top_level_blocks.push(block);
         }
     }
 }
@@ -222,22 +222,47 @@ fn flush_cell(
 
 fn flush_slide(
     cells: &mut Vec<Cell>,
+    notes: &mut Vec<Block>,
     slides: &mut Vec<Slide>,
     pending_slide_directives: &mut Vec<Directive>,
 ) {
-    if cells.is_empty() {
+    if cells.is_empty() && notes.is_empty() {
         return;
     }
-    let start = cells[0].span.start;
-    let end = cells.last().unwrap().span.end;
-    let taken = std::mem::take(cells);
+    let mut start = usize::MAX;
+    let mut end = 0usize;
+    for c in cells.iter() {
+        if c.span.start < start {
+            start = c.span.start;
+        }
+        if c.span.end > end {
+            end = c.span.end;
+        }
+    }
+    for b in notes.iter() {
+        let s = b.span();
+        if s.start < start {
+            start = s.start;
+        }
+        if s.end > end {
+            end = s.end;
+        }
+    }
+    let taken_cells = std::mem::take(cells);
+    let taken_notes = std::mem::take(notes);
     let directives = std::mem::take(pending_slide_directives);
     slides.push(Slide {
-        cells: taken,
-        notes: Vec::new(),
+        cells: taken_cells,
+        notes: taken_notes,
         directives,
         span: SourceSpan { start, end },
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockTarget {
+    Cell,
+    Notes,
 }
 
 pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
@@ -248,6 +273,8 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
     let mut stack: Vec<Builder> = Vec::new();
     let mut current_cell_blocks: Vec<Block> = Vec::new();
     let mut current_slide_cells: Vec<Cell> = Vec::new();
+    let mut current_slide_notes: Vec<Block> = Vec::new();
+    let mut target_stack: Vec<BlockTarget> = vec![BlockTarget::Cell];
     let mut slides: Vec<Slide> = Vec::new();
     let mut pending_cell_directives: Vec<Directive> = Vec::new();
     let mut pending_slide_directives: Vec<Directive> = Vec::new();
@@ -262,13 +289,17 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                 );
                 flush_slide(
                     &mut current_slide_cells,
+                    &mut current_slide_notes,
                     &mut slides,
                     &mut pending_slide_directives,
                 );
+                target_stack.clear();
+                target_stack.push(BlockTarget::Cell);
             }
             Event::Html(s) | Event::InlineHtml(s) => {
                 let text = s.as_ref();
-                if text.trim() == SLIDE_BREAK_SENTINEL {
+                let trimmed = text.trim();
+                if trimmed == SLIDE_BREAK_SENTINEL {
                     flush_cell(
                         &mut current_cell_blocks,
                         &mut current_slide_cells,
@@ -276,11 +307,40 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                     );
                     flush_slide(
                         &mut current_slide_cells,
+                        &mut current_slide_notes,
                         &mut slides,
                         &mut pending_slide_directives,
                     );
+                    target_stack.clear();
+                    target_stack.push(BlockTarget::Cell);
+                } else if trimmed == NOTES_START_SENTINEL {
+                    if stack.is_empty() {
+                        flush_cell(
+                            &mut current_cell_blocks,
+                            &mut current_slide_cells,
+                            &mut pending_cell_directives,
+                        );
+                        target_stack.push(BlockTarget::Notes);
+                    }
+                } else if trimmed == NOTES_END_SENTINEL {
+                    if stack.is_empty() && target_stack.len() > 1 {
+                        target_stack.pop();
+                    }
+                } else if trimmed == VISIBLE_START_SENTINEL {
+                    if stack.is_empty() {
+                        flush_cell(
+                            &mut current_cell_blocks,
+                            &mut current_slide_cells,
+                            &mut pending_cell_directives,
+                        );
+                        target_stack.push(BlockTarget::Cell);
+                    }
+                } else if trimmed == VISIBLE_END_SENTINEL {
+                    if stack.is_empty() && target_stack.len() > 1 {
+                        target_stack.pop();
+                    }
                 } else if let Some((name, args)) = parse_oxlide_comment(text) {
-                    if name == IMAGE_META_SENTINEL_NAME {
+                    if name == "image-meta" {
                         if let Ok(parsed) = serde_json::from_str::<ImageMeta>(&args)
                             && let Some(Block::Image { meta, span, .. }) =
                                 current_cell_blocks.last_mut()
@@ -396,7 +456,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                         } else {
                             Block::Paragraph { spans, span }
                         };
-                        push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        if matches!(target_stack.last(), Some(BlockTarget::Notes)) {
+                            push_block_into_parent(&mut stack, block, &mut current_slide_notes);
+                        } else {
+                            push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        }
                     }
                     (
                         Builder::Heading {
@@ -414,7 +478,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                                 end: end_original,
                             },
                         };
-                        push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        if matches!(target_stack.last(), Some(BlockTarget::Notes)) {
+                            push_block_into_parent(&mut stack, block, &mut current_slide_notes);
+                        } else {
+                            push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        }
                     }
                     (
                         Builder::List {
@@ -432,7 +500,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                                 end: end_original,
                             },
                         };
-                        push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        if matches!(target_stack.last(), Some(BlockTarget::Notes)) {
+                            push_block_into_parent(&mut stack, block, &mut current_slide_notes);
+                        } else {
+                            push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        }
                     }
                     (
                         Builder::Item {
@@ -511,7 +583,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                                 end: end_original,
                             },
                         };
-                        push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        if matches!(target_stack.last(), Some(BlockTarget::Notes)) {
+                            push_block_into_parent(&mut stack, block, &mut current_slide_notes);
+                        } else {
+                            push_block_into_parent(&mut stack, block, &mut current_cell_blocks);
+                        }
                     }
                     (Builder::Unhandled, _) => {}
                     _ => {}
@@ -564,6 +640,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
     );
     flush_slide(
         &mut current_slide_cells,
+        &mut current_slide_notes,
         &mut slides,
         &mut pending_slide_directives,
     );
@@ -585,7 +662,7 @@ mod tests {
 
     #[test]
     fn single_paragraph_single_slide() {
-        let deck = fold_source("hello");
+        let deck = fold_source("\thello");
         assert_eq!(deck.slides.len(), 1);
         assert_eq!(deck.slides[0].cells.len(), 1);
         assert_eq!(deck.slides[0].cells[0].blocks.len(), 1);
@@ -597,26 +674,26 @@ mod tests {
 
     #[test]
     fn rule_produces_two_slides() {
-        let deck = fold_source("A\n\n---\n\nB");
+        let deck = fold_source("\tA\n\n---\n\n\tB");
         assert_eq!(deck.slides.len(), 2);
     }
 
     #[test]
     fn cell_break_between_paragraphs() {
-        let deck = fold_source("Para A\n\nPara B");
+        let deck = fold_source("\tPara A\n\n\tPara B");
         assert_eq!(deck.slides.len(), 1);
         assert_eq!(deck.slides[0].cells.len(), 2);
     }
 
     #[test]
     fn leading_rule_does_not_produce_empty_slide() {
-        let deck = fold_source("---\n\nhello");
+        let deck = fold_source("---\n\n\thello");
         assert_eq!(deck.slides.len(), 1);
     }
 
     #[test]
     fn trailing_rule_does_not_produce_empty_slide() {
-        let deck = fold_source("hello\n\n---\n");
+        let deck = fold_source("\thello\n\n---\n");
         assert_eq!(deck.slides.len(), 1);
     }
 
@@ -632,7 +709,7 @@ mod tests {
 
     #[test]
     fn unordered_list() {
-        let deck = fold_source("- a\n- b");
+        let deck = fold_source("\t- a\n\t- b");
         if let Block::List { ordered, items, .. } = &deck.slides[0].cells[0].blocks[0] {
             assert!(!ordered);
             assert_eq!(items.len(), 2);
@@ -643,7 +720,7 @@ mod tests {
 
     #[test]
     fn ordered_list() {
-        let deck = fold_source("1. a\n2. b");
+        let deck = fold_source("\t1. a\n\t2. b");
         if let Block::List { ordered, items, .. } = &deck.slides[0].cells[0].blocks[0] {
             assert!(*ordered);
             assert_eq!(items.len(), 2);

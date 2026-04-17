@@ -1,3 +1,3 @@
-First paragraph becomes cell one.
+	First paragraph becomes cell one.
 
-Second paragraph becomes cell two.
+	Second paragraph becomes cell two.

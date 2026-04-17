@@ -1,7 +1,7 @@
 # Slide title
 
-First paragraph.
+	First paragraph.
 
 <!-- oxlide-layout: title-ascii -->
 
-Second paragraph.
+	Second paragraph.

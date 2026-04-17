@@ -2,6 +2,10 @@ use super::ast::{ParseError, SourceSpan};
 
 pub const SLIDE_BREAK_SENTINEL: &str = "<!-- oxlide-slide-break -->";
 pub const IMAGE_META_SENTINEL_NAME: &str = "image-meta";
+pub const NOTES_START_SENTINEL: &str = "<!-- oxlide-notes-start -->";
+pub const NOTES_END_SENTINEL: &str = "<!-- oxlide-notes-end -->";
+pub const VISIBLE_START_SENTINEL: &str = "<!-- oxlide-visible-start -->";
+pub const VISIBLE_END_SENTINEL: &str = "<!-- oxlide-visible-end -->";
 
 const IMAGE_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
 
@@ -246,6 +250,228 @@ fn detect_image_blocks(source: &str, lines: &[Line]) -> Result<Vec<ImageBlock>, 
     Ok(blocks)
 }
 
+fn is_fence_open(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
+fn fence_marker_of(text: &str) -> &'static str {
+    let t = text.trim_start();
+    if t.starts_with("```") { "```" } else { "~~~" }
+}
+
+fn find_html_comment_end(source: &str, lines: &[Line], start: usize) -> usize {
+    let first = line_text(source, lines[start]);
+    if first.contains("-->") {
+        return start + 1;
+    }
+    let mut j = start + 1;
+    while j < lines.len() {
+        if line_text(source, lines[j]).contains("-->") {
+            return j + 1;
+        }
+        j += 1;
+    }
+    lines.len()
+}
+
+fn find_fence_end(source: &str, lines: &[Line], start: usize, marker: &str) -> usize {
+    let mut j = start + 1;
+    while j < lines.len() {
+        let t = line_text(source, lines[j]);
+        if t.trim_start().starts_with(marker) {
+            return j + 1;
+        }
+        j += 1;
+    }
+    lines.len()
+}
+
+fn is_markdown_image_line(text: &str) -> bool {
+    let t = text.trim_end();
+    if !t.starts_with("![") {
+        return false;
+    }
+    let Some(close_bracket) = t.find(']') else {
+        return false;
+    };
+    let rest = &t[close_bracket + 1..];
+    rest.starts_with('(') && rest.ends_with(')') && rest.len() >= 2
+}
+
+fn looks_like_list_item(text: &str) -> bool {
+    let trimmed = text.trim_start_matches([' ']);
+    let bytes = trimmed.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let c = bytes[0];
+    if c == b'-' || c == b'*' || c == b'+' {
+        return bytes.len() == 1 || bytes[1] == b' ' || bytes[1] == b'\t';
+    }
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > 0 && i < bytes.len() && (bytes[i] == b'.' || bytes[i] == b')') {
+        let rest = i + 1;
+        return rest == bytes.len() || bytes[rest] == b' ' || bytes[rest] == b'\t';
+    }
+    false
+}
+
+fn has_trailing_newline(source: &str, line: Line) -> bool {
+    line.end < source.len() && source.as_bytes()[line.end] == b'\n'
+}
+
+fn emit_line_verbatim(source: &str, line: Line, rewritten: &mut String) {
+    rewritten.push_str(&source[line.start..line.end]);
+    if has_trailing_newline(source, line) {
+        rewritten.push('\n');
+    }
+}
+
+fn emit_image_block(
+    source: &str,
+    lines: &[Line],
+    block: &ImageBlock,
+    rewritten: &mut String,
+    entries: &mut Vec<OffsetEntry>,
+) {
+    let line = lines[block.path_line];
+    let last_line = lines[block.meta_line_end - 1];
+    let trailing = has_trailing_newline(source, last_line);
+    let orig_start = line.start;
+    let orig_end = if trailing { last_line.end + 1 } else { last_line.end };
+
+    let rw_start = rewritten.len();
+    rewritten.push_str("![](");
+    rewritten.push_str(&block.path);
+    rewritten.push(')');
+    rewritten.push('\n');
+    if !block.meta_json.is_empty() {
+        rewritten.push_str("<!-- oxlide-image-meta: ");
+        rewritten.push_str(&block.meta_json);
+        rewritten.push_str(" -->");
+        if trailing {
+            rewritten.push('\n');
+        }
+    } else if !trailing {
+        rewritten.pop();
+    }
+    let rw_end = rewritten.len();
+    entries.push(OffsetEntry {
+        rw_start,
+        rw_end,
+        orig_start,
+        orig_end,
+    });
+}
+
+fn find_plain_block_end(
+    source: &str,
+    lines: &[Line],
+    start: usize,
+    image_block_at: &[Option<usize>],
+) -> usize {
+    let first_text = line_text(source, lines[start]);
+    let first_tab = first_text.starts_with('\t');
+    let first_content = if first_tab { &first_text[1..] } else { first_text };
+    let first_is_list = looks_like_list_item(first_content);
+
+    let mut j = start + 1;
+    while j < lines.len() && !lines[j].blank {
+        if image_block_at[j].is_some() {
+            break;
+        }
+        let text = line_text(source, lines[j]);
+        if text.starts_with('#') {
+            break;
+        }
+        if is_fence_open(text) {
+            break;
+        }
+
+        let this_tab = text.starts_with('\t');
+        let this_content = if this_tab { &text[1..] } else { text };
+        let this_is_list = looks_like_list_item(this_content);
+
+        if first_is_list {
+            if this_tab != first_tab {
+                break;
+            }
+        } else if this_is_list {
+            break;
+        }
+
+        j += 1;
+    }
+    j
+}
+
+fn emit_wrapped_block(
+    source: &str,
+    lines: &[Line],
+    start: usize,
+    end: usize,
+    opener_text: &str,
+    closer_text: &str,
+    strip_leading_tab: bool,
+    rewritten: &mut String,
+    entries: &mut Vec<OffsetEntry>,
+) {
+    let block_orig_start = lines[start].start;
+    let last = lines[end - 1];
+    let trailing = has_trailing_newline(source, last);
+    let block_orig_end = if trailing { last.end + 1 } else { last.end };
+
+    let rw_pos = rewritten.len();
+    let opener = format!("{}\n\n", opener_text);
+    rewritten.push_str(&opener);
+    entries.push(OffsetEntry::pure_insertion(
+        rw_pos,
+        block_orig_start,
+        opener.len(),
+    ));
+
+    for i in start..end {
+        let line = lines[i];
+        let text = &source[line.start..line.end];
+        if strip_leading_tab {
+            if let Some(rest) = text.strip_prefix('\t') {
+                let rw_tab_pos = rewritten.len();
+                entries.push(OffsetEntry {
+                    rw_start: rw_tab_pos,
+                    rw_end: rw_tab_pos,
+                    orig_start: line.start,
+                    orig_end: line.start + 1,
+                });
+                rewritten.push_str(rest);
+            } else {
+                rewritten.push_str(text);
+            }
+        } else {
+            rewritten.push_str(text);
+        }
+        if has_trailing_newline(source, line) {
+            rewritten.push('\n');
+        }
+    }
+
+    let rw_pos = rewritten.len();
+    let closer = if trailing {
+        format!("\n{}\n\n", closer_text)
+    } else {
+        format!("\n\n{}\n\n", closer_text)
+    };
+    rewritten.push_str(&closer);
+    entries.push(OffsetEntry::pure_insertion(
+        rw_pos,
+        block_orig_end,
+        closer.len(),
+    ));
+}
+
 pub fn prepass(source: &str) -> Result<PrepassOutput, ParseError> {
     let lines = scan_lines(source);
     let image_blocks = detect_image_blocks(source, &lines)?;
@@ -274,72 +500,100 @@ pub fn prepass(source: &str) -> Result<PrepassOutput, ParseError> {
         }
     }
 
-    let mut rewritten = String::with_capacity(source.len() + 64);
+    let mut rewritten = String::with_capacity(source.len() + 256);
     let mut entries: Vec<OffsetEntry> = Vec::new();
 
     let mut idx = 0;
     while idx < lines.len() {
-        let line = lines[idx];
-
         if let Some(block_idx) = image_block_at[idx] {
             let block = &image_blocks[block_idx];
-            let last_line = lines[block.meta_line_end - 1];
-            let has_trailing_nl =
-                last_line.end < source.len() && source.as_bytes()[last_line.end] == b'\n';
-            let orig_start = line.start;
-            let orig_end = if has_trailing_nl {
-                last_line.end + 1
-            } else {
-                last_line.end
-            };
-
-            let rw_start = rewritten.len();
-            rewritten.push_str("![](");
-            rewritten.push_str(&block.path);
-            rewritten.push(')');
-            rewritten.push('\n');
-            if !block.meta_json.is_empty() {
-                rewritten.push_str("<!-- oxlide-image-meta: ");
-                rewritten.push_str(&block.meta_json);
-                rewritten.push_str(" -->");
-                if has_trailing_nl {
-                    rewritten.push('\n');
-                }
-            } else if !has_trailing_nl {
-                rewritten.pop();
-            }
-            let rw_end = rewritten.len();
-            entries.push(OffsetEntry {
-                rw_start,
-                rw_end,
-                orig_start,
-                orig_end,
-            });
-
+            emit_image_block(source, &lines, block, &mut rewritten, &mut entries);
             idx = block.meta_line_end;
             continue;
         }
 
-        rewritten.push_str(&source[line.start..line.end]);
-        let has_newline_after = line.end < source.len() && source.as_bytes()[line.end] == b'\n';
-        if has_newline_after {
-            rewritten.push('\n');
+        let line = lines[idx];
+
+        if line.blank {
+            emit_line_verbatim(source, line, &mut rewritten);
+            if insert_after_line[idx] {
+                let rw_pos = rewritten.len();
+                let injected = format!("{}\n\n", SLIDE_BREAK_SENTINEL);
+                let len = injected.len();
+                rewritten.push_str(&injected);
+                let orig_pos = if has_trailing_newline(source, line) {
+                    line.end + 1
+                } else {
+                    line.end
+                };
+                entries.push(OffsetEntry::pure_insertion(rw_pos, orig_pos, len));
+            }
+            idx += 1;
+            continue;
         }
 
-        if insert_after_line[idx] {
-            let rw_pos = rewritten.len();
-            let injected = format!("{}\n\n", SLIDE_BREAK_SENTINEL);
-            let len = injected.len();
-            rewritten.push_str(&injected);
-            let orig_pos = if has_newline_after {
-                line.end + 1
-            } else {
-                line.end
-            };
-            entries.push(OffsetEntry::pure_insertion(rw_pos, orig_pos, len));
+        let text = line_text(source, line);
+
+        if text.starts_with('#') {
+            emit_line_verbatim(source, line, &mut rewritten);
+            idx += 1;
+            continue;
         }
 
-        idx += 1;
+        if is_fence_open(text) {
+            let marker = fence_marker_of(text);
+            let fence_end = find_fence_end(source, &lines, idx, marker);
+            for i in idx..fence_end {
+                emit_line_verbatim(source, lines[i], &mut rewritten);
+            }
+            idx = fence_end;
+            continue;
+        }
+
+        if is_markdown_image_line(text) {
+            emit_line_verbatim(source, line, &mut rewritten);
+            idx += 1;
+            continue;
+        }
+
+        if text.starts_with("<!--") {
+            let comment_end = find_html_comment_end(source, &lines, idx);
+            for i in idx..comment_end {
+                emit_line_verbatim(source, lines[i], &mut rewritten);
+            }
+            idx = comment_end;
+            continue;
+        }
+
+        let is_tab = text.starts_with('\t');
+        let block_end = find_plain_block_end(source, &lines, idx, &image_block_at);
+
+        if is_tab {
+            emit_wrapped_block(
+                source,
+                &lines,
+                idx,
+                block_end,
+                VISIBLE_START_SENTINEL,
+                VISIBLE_END_SENTINEL,
+                true,
+                &mut rewritten,
+                &mut entries,
+            );
+        } else {
+            emit_wrapped_block(
+                source,
+                &lines,
+                idx,
+                block_end,
+                NOTES_START_SENTINEL,
+                NOTES_END_SENTINEL,
+                false,
+                &mut rewritten,
+                &mut entries,
+            );
+        }
+        idx = block_end;
     }
 
     Ok(PrepassOutput {
@@ -444,14 +698,14 @@ mod tests {
     fn prepass_leading_blanks_not_injected() {
         let source = "\n\n\n\nhello";
         let out = prepass(source).unwrap();
-        assert!(out.entries.is_empty());
+        assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
     }
 
     #[test]
     fn prepass_trailing_blanks_not_injected() {
         let source = "hello\n\n\n\n";
         let out = prepass(source).unwrap();
-        assert!(out.entries.is_empty());
+        assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
     }
 
     #[test]
@@ -546,5 +800,74 @@ mod tests {
     #[test]
     fn strip_outer_quotes_none() {
         assert_eq!(strip_outer_quotes("#fff"), "#fff");
+    }
+
+    #[test]
+    fn prepass_wraps_notes_block() {
+        let out = prepass("notes line\n").unwrap();
+        assert!(out.rewritten.contains(NOTES_START_SENTINEL));
+        assert!(out.rewritten.contains(NOTES_END_SENTINEL));
+    }
+
+    #[test]
+    fn prepass_wraps_tab_visible_block_and_strips_tab() {
+        let out = prepass("\tvisible\n").unwrap();
+        assert!(out.rewritten.contains(VISIBLE_START_SENTINEL));
+        assert!(out.rewritten.contains(VISIBLE_END_SENTINEL));
+        assert!(out.rewritten.contains("visible"));
+        assert!(!out.rewritten.contains("\tvisible"));
+    }
+
+    #[test]
+    fn prepass_heading_not_wrapped() {
+        let out = prepass("# Title\n").unwrap();
+        assert!(!out.rewritten.contains(NOTES_START_SENTINEL));
+        assert!(!out.rewritten.contains(VISIBLE_START_SENTINEL));
+    }
+
+    #[test]
+    fn prepass_fenced_code_not_wrapped_even_if_content_unindented() {
+        let out = prepass("```\nhello\n```\n").unwrap();
+        assert!(!out.rewritten.contains(NOTES_START_SENTINEL));
+        assert!(!out.rewritten.contains(VISIBLE_START_SENTINEL));
+    }
+
+    #[test]
+    fn prepass_tab_visible_span_maps_back_through_tab_deletion() {
+        let source = "\tHello\n";
+        let out = prepass(source).unwrap();
+        let hello_rw = out.rewritten.find("Hello").expect("Hello should appear");
+        let orig_pos = rewritten_to_original(hello_rw, &out.entries);
+        assert_eq!(orig_pos, 1, "rewritten 'H' should map to original offset 1 (after tab)");
+    }
+
+    #[test]
+    fn looks_like_list_item_unordered() {
+        assert!(looks_like_list_item("- hello"));
+        assert!(looks_like_list_item("* hello"));
+        assert!(looks_like_list_item("+ hello"));
+        assert!(!looks_like_list_item("-hello"));
+        assert!(!looks_like_list_item("text - word"));
+    }
+
+    #[test]
+    fn looks_like_list_item_ordered() {
+        assert!(looks_like_list_item("1. hello"));
+        assert!(looks_like_list_item("42. hello"));
+        assert!(looks_like_list_item("1) hello"));
+        assert!(!looks_like_list_item("1hello"));
+        assert!(!looks_like_list_item("1.hello"));
+    }
+
+    #[test]
+    fn is_markdown_image_line_valid() {
+        assert!(is_markdown_image_line("![alt](path.png)"));
+        assert!(is_markdown_image_line("![](path.png)"));
+    }
+
+    #[test]
+    fn is_markdown_image_line_rejects_inline() {
+        assert!(!is_markdown_image_line("text ![img](p.png) more"));
+        assert!(!is_markdown_image_line("![img](p.png) trailing"));
     }
 }

@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn acceptance_two_slides_with_rule() {
-        let src = "# Hello\n\nWorld\n\n---\n\n# Two";
+        let src = "# Hello\n\n\tWorld\n\n---\n\n# Two";
         let d = deck(src);
         assert_eq!(d.slides.len(), 2);
         assert_eq!(d.slides[0].cells.len(), 2, "heading + paragraph as 2 cells");
@@ -63,7 +63,7 @@ mod tests {
 
     #[test]
     fn acceptance_cell_break_single_blank() {
-        let d = deck("Para A\n\nPara B");
+        let d = deck("\tPara A\n\n\tPara B");
         assert_eq!(d.slides.len(), 1);
         assert_eq!(d.slides[0].cells.len(), 2);
     }
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn nested_list_preserves_structure() {
-        let src = "- outer\n  - inner\n";
+        let src = "\t- outer\n\t  - inner\n";
         let d = deck(src);
         let outer = &d.slides[0].cells[0].blocks[0];
         if let Block::List {
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn single_slide_when_no_break() {
-        let d = deck("# heading\n\npara\n\npara2\n");
+        let d = deck("# heading\n\n\tpara\n\n\tpara2\n");
         assert_eq!(d.slides.len(), 1);
         assert_eq!(d.slides[0].cells.len(), 3);
     }
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn list_item_preserves_inline_spans() {
-        let d = deck("- plain `code` text");
+        let d = deck("\t- plain `code` text");
         match &d.slides[0].cells[0].blocks[0] {
             Block::List { items, .. } => {
                 let item = &items[0];
@@ -842,6 +842,155 @@ mod tests {
             for cell in &slide.cells {
                 assert!(cell.directives.is_empty());
             }
+        }
+    }
+
+    #[test]
+    fn acceptance_notes_inversion_mixed() {
+        let src = "# Title\n\nThis is speaker notes.\n\n\tThis is a visible paragraph.\n";
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        let slide = &d.slides[0];
+        assert_eq!(slide.cells.len(), 2);
+        match &slide.cells[0].blocks[0] {
+            Block::Heading { level, spans, .. } => {
+                assert_eq!(*level, 1);
+                assert_eq!(spans, &[InlineSpan::Text("Title".into())]);
+            }
+            other => panic!("expected heading, got {:?}", other),
+        }
+        match &slide.cells[1].blocks[0] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans, &[InlineSpan::Text("This is a visible paragraph.".into())]);
+            }
+            other => panic!("expected visible paragraph, got {:?}", other),
+        }
+        assert_eq!(slide.notes.len(), 1);
+        match &slide.notes[0] {
+            Block::Paragraph { spans, .. } => {
+                assert_eq!(spans, &[InlineSpan::Text("This is speaker notes.".into())]);
+            }
+            other => panic!("expected notes paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_notes_only_slide() {
+        let src = include_str!("fixtures/notes-only-slide.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert!(d.slides[0].cells.is_empty());
+        assert_eq!(d.slides[0].notes.len(), 2);
+    }
+
+    #[test]
+    fn fixture_mixed_notes_and_visible() {
+        let src = include_str!("fixtures/mixed-notes-and-visible.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        let slide = &d.slides[0];
+        assert_eq!(slide.cells.len(), 2);
+        assert!(matches!(
+            slide.cells[0].blocks[0],
+            Block::Heading { level: 1, .. }
+        ));
+        assert!(matches!(
+            slide.cells[1].blocks[0],
+            Block::Paragraph { .. }
+        ));
+        assert_eq!(slide.notes.len(), 1);
+    }
+
+    #[test]
+    fn fixture_all_visible_tab_indent() {
+        let src = include_str!("fixtures/all-visible-tab-indent.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert_eq!(d.slides[0].cells.len(), 3);
+        assert!(d.slides[0].notes.is_empty());
+    }
+
+    #[test]
+    fn fixture_fenced_code_not_inverted() {
+        let src = include_str!("fixtures/fenced-code-not-inverted.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert_eq!(d.slides[0].cells.len(), 1);
+        assert!(matches!(
+            d.slides[0].cells[0].blocks[0],
+            Block::CodeBlock { .. }
+        ));
+        assert!(d.slides[0].notes.is_empty());
+    }
+
+    #[test]
+    fn fixture_list_tab_indent() {
+        let src = include_str!("fixtures/list-tab-indent.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert_eq!(d.slides[0].cells.len(), 1);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::List { items, ordered, .. } => {
+                assert!(!ordered);
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("expected visible list, got {:?}", other),
+        }
+        assert!(d.slides[0].notes.is_empty());
+    }
+
+    #[test]
+    fn fixture_list_mixed_indent() {
+        let src = include_str!("fixtures/list-mixed-indent.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert_eq!(d.slides[0].cells.len(), 1);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::List { items, .. } => assert_eq!(items.len(), 2),
+            other => panic!("expected visible list, got {:?}", other),
+        }
+        assert_eq!(d.slides[0].notes.len(), 1);
+        match &d.slides[0].notes[0] {
+            Block::List { items, .. } => assert_eq!(items.len(), 2),
+            other => panic!("expected notes list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_edge_mixed_leading_whitespace() {
+        let src = include_str!("fixtures/edge-mixed-leading-whitespace.md");
+        let d = deck(src);
+        assert_eq!(d.slides.len(), 1);
+        assert!(d.slides[0].cells.is_empty());
+        assert_eq!(d.slides[0].notes.len(), 1);
+    }
+
+    #[test]
+    fn fixture_span_points_to_original_source() {
+        let src = include_str!("fixtures/span-points-to-original-source.md");
+        let d = deck(src);
+        let slide = &d.slides[0];
+        // Heading span points into original
+        let heading = &slide.cells[0].blocks[0];
+        if let Block::Heading { span, .. } = heading {
+            assert!(src[span.start..span.end].contains("Heading"));
+        } else {
+            panic!("expected heading");
+        }
+        // Notes span points into original
+        assert_eq!(slide.notes.len(), 1);
+        let note = &slide.notes[0];
+        if let Block::Paragraph { span, .. } = note {
+            assert!(src[span.start..span.end].contains("quick brown fox"));
+        } else {
+            panic!("expected notes paragraph");
+        }
+        // Visible paragraph span points into original (includes original tab)
+        let visible = &slide.cells[1].blocks[0];
+        if let Block::Paragraph { span, .. } = visible {
+            assert!(src[span.start..span.end].contains("Visible paragraph"));
+        } else {
+            panic!("expected visible paragraph");
         }
     }
 }
