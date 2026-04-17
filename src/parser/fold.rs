@@ -1,7 +1,12 @@
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::ast::{Block, Cell, Directive, InlineSpan, ListItem, Slide, SlideDeck, SourceSpan};
-use super::prepass::{PrepassOutput, SLIDE_BREAK_SENTINEL, rewritten_to_original};
+use super::ast::{
+    Block, Cell, Directive, ImageMeta, InlineSpan, ListItem, Slide, SlideDeck, SourceSpan,
+};
+use super::prepass::{
+    IMAGE_META_SENTINEL_NAME, PrepassOutput, SLIDE_BREAK_SENTINEL, entry_containing,
+    rewritten_to_original,
+};
 
 fn parse_oxlide_comment(text: &str) -> Option<(String, String)> {
     let trimmed = text.trim();
@@ -223,8 +228,8 @@ fn flush_slide(
 
 pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
     let parser = Parser::new_ext(&prepass_out.rewritten, Options::empty());
-    let insertions = &prepass_out.insertions;
-    let map = |rw: usize| rewritten_to_original(rw, insertions);
+    let entries = &prepass_out.entries;
+    let map = |rw: usize| rewritten_to_original(rw, entries);
 
     let mut stack: Vec<Builder> = Vec::new();
     let mut current_cell_blocks: Vec<Block> = Vec::new();
@@ -260,21 +265,31 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                         &mut slides,
                         &mut pending_slide_directives,
                     );
-                } else if let Some((name, args)) = parse_oxlide_comment(text)
-                    && !is_internal_sentinel(&name)
-                {
-                    let directive = Directive::Raw {
-                        name,
-                        args,
-                        span: SourceSpan {
-                            start: map(range.start),
-                            end: map(range.end),
-                        },
-                    };
-                    if !stack.is_empty() || !current_cell_blocks.is_empty() {
-                        pending_cell_directives.push(directive);
-                    } else {
-                        pending_slide_directives.push(directive);
+                } else if let Some((name, args)) = parse_oxlide_comment(text) {
+                    if name == IMAGE_META_SENTINEL_NAME {
+                        if let Ok(parsed) = serde_json::from_str::<ImageMeta>(&args)
+                            && let Some(Block::Image { meta, span, .. }) =
+                                current_cell_blocks.last_mut()
+                        {
+                            *meta = Some(parsed);
+                            if let Some(entry) = entry_containing(range.start, entries) {
+                                span.end = entry.orig_end;
+                            }
+                        }
+                    } else if !is_internal_sentinel(&name) {
+                        let directive = Directive::Raw {
+                            name,
+                            args,
+                            span: SourceSpan {
+                                start: map(range.start),
+                                end: map(range.end),
+                            },
+                        };
+                        if !stack.is_empty() || !current_cell_blocks.is_empty() {
+                            pending_cell_directives.push(directive);
+                        } else {
+                            pending_slide_directives.push(directive);
+                        }
                     }
                 }
             }
@@ -345,7 +360,12 @@ pub fn fold(prepass_out: &PrepassOutput) -> SlideDeck {
                             else {
                                 unreachable!()
                             };
-                            Block::Image { src, alt, span }
+                            Block::Image {
+                                src,
+                                alt,
+                                meta: None,
+                                span,
+                            }
                         } else {
                             Block::Paragraph { spans, span }
                         };
@@ -511,7 +531,7 @@ mod tests {
     use super::*;
 
     fn fold_source(source: &str) -> SlideDeck {
-        fold(&prepass(source))
+        fold(&prepass(source).unwrap())
     }
 
     #[test]

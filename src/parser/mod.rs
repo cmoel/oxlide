@@ -3,7 +3,8 @@ pub mod fold;
 pub mod prepass;
 
 pub use ast::{
-    Block, Cell, Directive, InlineSpan, ListItem, ParseError, Slide, SlideDeck, SourceSpan,
+    Block, Cell, Directive, ImageAlign, ImageMeta, ImageSize, InlineSpan, ListItem, ParseError,
+    Slide, SlideDeck, SourceSpan,
 };
 
 #[cfg(test)]
@@ -19,7 +20,7 @@ fn directive_args(d: &Directive) -> &str {
 }
 
 pub fn parse_deck(source: &str) -> Result<SlideDeck, ParseError> {
-    let prepass_out = prepass::prepass(source);
+    let prepass_out = prepass::prepass(source)?;
     let mut deck = fold::fold(&prepass_out);
     deck.source = source.to_string();
     Ok(deck)
@@ -635,6 +636,110 @@ mod tests {
                 }
             }
             other => panic!("expected list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_with_all_keys() {
+        let src = include_str!("fixtures/ia-image-with-all-keys.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image {
+                src, alt, meta, ..
+            } => {
+                assert_eq!(src, "hero.png");
+                assert_eq!(alt, "");
+                let meta = meta.as_ref().expect("meta should be attached");
+                assert_eq!(meta.size, Some(ImageSize::Contain));
+                assert_eq!(meta.x, Some(ImageAlign::End));
+                assert_eq!(meta.y, Some(ImageAlign::Start));
+                assert_eq!(meta.background.as_deref(), Some("#fff"));
+                assert_eq!(meta.opacity, Some(0.5));
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_no_metadata() {
+        let src = include_str!("fixtures/ia-image-no-metadata.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image {
+                src, alt, meta, ..
+            } => {
+                assert_eq!(src, "hero.png");
+                assert_eq!(alt, "");
+                assert!(meta.is_none());
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_quoted_values() {
+        let src = include_str!("fixtures/ia-image-quoted-values.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { meta, .. } => {
+                let meta = meta.as_ref().expect("meta should be attached");
+                assert_eq!(meta.background.as_deref(), Some("#fff"));
+                assert_eq!(meta.size, Some(ImageSize::Contain));
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_unknown_key_ignored() {
+        let src = include_str!("fixtures/ia-image-unknown-key-ignored.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { meta, .. } => {
+                let meta = meta.as_ref().expect("meta should be attached");
+                assert_eq!(meta.size, Some(ImageSize::Contain));
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_invalid_opacity_errors() {
+        let src = include_str!("fixtures/ia-image-invalid-opacity-errors.md");
+        let err = parse_deck(src).expect_err("should error on invalid opacity");
+        match err {
+            ParseError::InvalidImageMeta { key, value, .. } => {
+                assert_eq!(key, "opacity");
+                assert_eq!(value, "1.5");
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_ia_image_non_image_extension_falls_through() {
+        let src = include_str!("fixtures/ia-image-non-image-extension-falls-through.md");
+        let d = deck(src);
+        let has_image_block = d.slides[0]
+            .cells
+            .iter()
+            .flat_map(|c| &c.blocks)
+            .any(|b| matches!(b, Block::Image { .. }));
+        assert!(
+            !has_image_block,
+            "non-image extension should not produce Block::Image"
+        );
+    }
+
+    #[test]
+    fn fixture_ia_image_kebab_case_size() {
+        let src = include_str!("fixtures/ia-image-kebab-case-size.md");
+        let d = deck(src);
+        match &d.slides[0].cells[0].blocks[0] {
+            Block::Image { meta, .. } => {
+                let meta = meta.as_ref().expect("meta should be attached");
+                assert_eq!(meta.size, Some(ImageSize::FitWidth));
+            }
+            other => panic!("expected Block::Image, got {:?}", other),
         }
     }
 

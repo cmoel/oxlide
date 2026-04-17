@@ -1,3 +1,5 @@
+use serde::Deserialize;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceSpan {
     pub start: usize,
@@ -20,13 +22,44 @@ pub enum InlineSpan {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListItem {
     pub blocks: Vec<Block>,
     pub span: SourceSpan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImageSize {
+    Contain,
+    Cover,
+    FitWidth,
+    FitHeight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageAlign {
+    Start,
+    Center,
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+pub struct ImageMeta {
+    #[serde(default)]
+    pub size: Option<ImageSize>,
+    #[serde(default)]
+    pub x: Option<ImageAlign>,
+    #[serde(default)]
+    pub y: Option<ImageAlign>,
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Paragraph {
         spans: Vec<InlineSpan>,
@@ -45,6 +78,7 @@ pub enum Block {
     Image {
         src: String,
         alt: String,
+        meta: Option<ImageMeta>,
         span: SourceSpan,
     },
 }
@@ -69,14 +103,14 @@ pub enum Directive {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
     pub blocks: Vec<Block>,
     pub directives: Vec<Directive>,
     pub span: SourceSpan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Slide {
     pub cells: Vec<Cell>,
     pub notes: Vec<Block>,
@@ -84,18 +118,30 @@ pub struct Slide {
     pub span: SourceSpan,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SlideDeck {
     pub slides: Vec<Slide>,
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParseError {}
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParseError {
+    InvalidImageMeta {
+        span: SourceSpan,
+        key: String,
+        value: String,
+    },
+}
 
 impl std::fmt::Display for ParseError {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParseError::InvalidImageMeta { span, key, value } => write!(
+                f,
+                "invalid image metadata at {}..{}: {}={}",
+                span.start, span.end, key, value
+            ),
+        }
     }
 }
 
