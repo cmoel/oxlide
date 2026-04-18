@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod layout;
 pub mod parser;
+pub mod present;
 pub mod render;
 pub mod wake;
 
