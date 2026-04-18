@@ -5,8 +5,9 @@ use super::ast::{
     SourceSpan,
 };
 use super::prepass::{
-    NOTES_END_SENTINEL, NOTES_START_SENTINEL, PrepassOutput, SLIDE_BREAK_SENTINEL,
-    VISIBLE_END_SENTINEL, VISIBLE_START_SENTINEL, entry_containing, rewritten_to_original,
+    CELL_BREAK_SENTINEL, NOTES_END_SENTINEL, NOTES_START_SENTINEL, PrepassOutput,
+    SLIDE_BREAK_SENTINEL, VISIBLE_END_SENTINEL, VISIBLE_START_SENTINEL, entry_containing,
+    rewritten_to_original,
 };
 
 fn parse_oxlide_comment(text: &str) -> Option<(String, String)> {
@@ -35,6 +36,7 @@ fn is_internal_sentinel(name: &str) -> bool {
             | "notes-end"
             | "image-meta"
             | "slide-break"
+            | "cell-break"
     )
 }
 
@@ -278,6 +280,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
     let mut slides: Vec<Slide> = Vec::new();
     let mut pending_cell_directives: Vec<Directive> = Vec::new();
     let mut pending_slide_directives: Vec<Directive> = Vec::new();
+    let mut pending_cell_break = false;
 
     for (event, range) in parser.into_offset_iter() {
         match event {
@@ -295,6 +298,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                 );
                 target_stack.clear();
                 target_stack.push(BlockTarget::Cell);
+                pending_cell_break = false;
             }
             Event::Html(s) | Event::InlineHtml(s) => {
                 let text = s.as_ref();
@@ -313,6 +317,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                     );
                     target_stack.clear();
                     target_stack.push(BlockTarget::Cell);
+                    pending_cell_break = false;
+                } else if trimmed == CELL_BREAK_SENTINEL {
+                    if stack.is_empty() {
+                        pending_cell_break = true;
+                    }
                 } else if trimmed == NOTES_START_SENTINEL {
                     if stack.is_empty() {
                         flush_cell(
@@ -320,6 +329,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                             &mut current_slide_cells,
                             &mut pending_cell_directives,
                         );
+                        pending_cell_break = false;
                         target_stack.push(BlockTarget::Notes);
                     }
                 } else if trimmed == NOTES_END_SENTINEL {
@@ -328,11 +338,6 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                     }
                 } else if trimmed == VISIBLE_START_SENTINEL {
                     if stack.is_empty() {
-                        flush_cell(
-                            &mut current_cell_blocks,
-                            &mut current_slide_cells,
-                            &mut pending_cell_directives,
-                        );
                         target_stack.push(BlockTarget::Cell);
                     }
                 } else if trimmed == VISIBLE_END_SENTINEL {
@@ -371,12 +376,13 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                 if matches!(tag, Tag::HtmlBlock) {
                     continue;
                 }
-                if stack.is_empty() && !current_cell_blocks.is_empty() {
+                if stack.is_empty() && pending_cell_break {
                     flush_cell(
                         &mut current_cell_blocks,
                         &mut current_slide_cells,
                         &mut pending_cell_directives,
                     );
+                    pending_cell_break = false;
                 }
                 let start_rw = range.start;
                 let builder = match tag {
@@ -727,5 +733,75 @@ mod tests {
         } else {
             panic!("expected ordered list");
         }
+    }
+
+    #[test]
+    fn heading_plus_prose_no_blank_is_one_cell() {
+        let deck = fold_source("# Heading\n\tprose");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].cells.len(), 1);
+        assert_eq!(deck.slides[0].cells[0].blocks.len(), 2);
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[0],
+            Block::Heading { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[1],
+            Block::Paragraph { .. }
+        ));
+    }
+
+    #[test]
+    fn heading_blank_prose_is_two_cells() {
+        let deck = fold_source("# Heading\n\n\tprose");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].cells.len(), 2);
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[0],
+            Block::Heading { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[1].blocks[0],
+            Block::Paragraph { .. }
+        ));
+    }
+
+    #[test]
+    fn heading_blank_prose_blank_list_is_three_cells() {
+        let deck = fold_source("# Heading\n\n\tprose\n\n\t- item");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].cells.len(), 3);
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[0],
+            Block::Heading { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[1].blocks[0],
+            Block::Paragraph { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[2].blocks[0],
+            Block::List { .. }
+        ));
+    }
+
+    #[test]
+    fn heading_prose_list_no_blanks_is_one_cell_with_three_blocks() {
+        let deck = fold_source("# Heading\n\tprose\n\t- item");
+        assert_eq!(deck.slides.len(), 1);
+        assert_eq!(deck.slides[0].cells.len(), 1);
+        assert_eq!(deck.slides[0].cells[0].blocks.len(), 3);
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[0],
+            Block::Heading { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[1],
+            Block::Paragraph { .. }
+        ));
+        assert!(matches!(
+            deck.slides[0].cells[0].blocks[2],
+            Block::List { .. }
+        ));
     }
 }

@@ -1,6 +1,7 @@
 use super::ast::{ParseError, SourceSpan};
 
 pub const SLIDE_BREAK_SENTINEL: &str = "<!-- oxlide-slide-break -->";
+pub const CELL_BREAK_SENTINEL: &str = "<!-- oxlide-cell-break -->";
 pub const IMAGE_META_SENTINEL_NAME: &str = "image-meta";
 pub const NOTES_START_SENTINEL: &str = "<!-- oxlide-notes-start -->";
 pub const NOTES_END_SENTINEL: &str = "<!-- oxlide-notes-end -->";
@@ -8,6 +9,12 @@ pub const VISIBLE_START_SENTINEL: &str = "<!-- oxlide-visible-start -->";
 pub const VISIBLE_END_SENTINEL: &str = "<!-- oxlide-visible-end -->";
 
 const IMAGE_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BreakKind {
+    Slide,
+    Cell,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Line {
@@ -481,7 +488,7 @@ pub fn prepass(source: &str) -> Result<PrepassOutput, ParseError> {
         image_block_at[b.path_line] = Some(idx);
     }
 
-    let mut insert_after_line: Vec<bool> = vec![false; lines.len()];
+    let mut insert_after_line: Vec<Option<BreakKind>> = vec![None; lines.len()];
     let mut i = 0;
     while i < lines.len() {
         if lines[i].blank {
@@ -492,8 +499,13 @@ pub fn prepass(source: &str) -> Result<PrepassOutput, ParseError> {
             let run_end = i;
             let has_before = run_start > 0 && !lines[run_start - 1].blank;
             let has_after = run_end < lines.len() && !lines[run_end].blank;
-            if has_before && has_after && (run_end - run_start) >= 2 {
-                insert_after_line[run_start] = true;
+            if has_before && has_after {
+                let kind = if (run_end - run_start) >= 2 {
+                    BreakKind::Slide
+                } else {
+                    BreakKind::Cell
+                };
+                insert_after_line[run_start] = Some(kind);
             }
         } else {
             i += 1;
@@ -516,9 +528,13 @@ pub fn prepass(source: &str) -> Result<PrepassOutput, ParseError> {
 
         if line.blank {
             emit_line_verbatim(source, line, &mut rewritten);
-            if insert_after_line[idx] {
+            if let Some(kind) = insert_after_line[idx] {
+                let sentinel = match kind {
+                    BreakKind::Slide => SLIDE_BREAK_SENTINEL,
+                    BreakKind::Cell => CELL_BREAK_SENTINEL,
+                };
                 let rw_pos = rewritten.len();
-                let injected = format!("{}\n\n", SLIDE_BREAK_SENTINEL);
+                let injected = format!("{}\n\n", sentinel);
                 let len = injected.len();
                 rewritten.push_str(&injected);
                 let orig_pos = if has_trailing_newline(source, line) {
@@ -679,18 +695,20 @@ mod tests {
     }
 
     #[test]
-    fn prepass_no_double_blank_is_identity() {
+    fn prepass_injects_cell_break_for_single_blank() {
         let source = "# A\n\n# B";
         let out = prepass(source).unwrap();
-        assert_eq!(out.rewritten, source);
-        assert!(out.entries.is_empty());
+        assert!(out.rewritten.contains(CELL_BREAK_SENTINEL));
+        assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
+        assert_eq!(out.entries.len(), 1);
     }
 
     #[test]
-    fn prepass_injects_sentinel_for_double_blank() {
+    fn prepass_injects_slide_break_for_double_blank() {
         let source = "# A\n\n\n\n# B";
         let out = prepass(source).unwrap();
         assert!(out.rewritten.contains(SLIDE_BREAK_SENTINEL));
+        assert!(!out.rewritten.contains(CELL_BREAK_SENTINEL));
         assert_eq!(out.entries.len(), 1);
     }
 
@@ -699,12 +717,22 @@ mod tests {
         let source = "\n\n\n\nhello";
         let out = prepass(source).unwrap();
         assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
+        assert!(!out.rewritten.contains(CELL_BREAK_SENTINEL));
     }
 
     #[test]
     fn prepass_trailing_blanks_not_injected() {
         let source = "hello\n\n\n\n";
         let out = prepass(source).unwrap();
+        assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
+        assert!(!out.rewritten.contains(CELL_BREAK_SENTINEL));
+    }
+
+    #[test]
+    fn prepass_no_blank_line_no_break_injected() {
+        let source = "# A\n\tprose";
+        let out = prepass(source).unwrap();
+        assert!(!out.rewritten.contains(CELL_BREAK_SENTINEL));
         assert!(!out.rewritten.contains(SLIDE_BREAK_SENTINEL));
     }
 
