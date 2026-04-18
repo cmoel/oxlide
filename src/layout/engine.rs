@@ -1,9 +1,69 @@
-use crate::parser::Slide;
+use crate::parser::{Block, Cell, Slide};
 use ratatui::layout::{Constraint, Layout, Rect};
 
 /// Minimum width for any column in a multi-cell layout. When a proposed column
 /// would be narrower than this, the whole slide falls back to a vertical stack.
 pub(crate) const MIN_COL_WIDTH: u16 = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CellType {
+    Image,
+    Code,
+    List,
+    Prose,
+    Heading,
+    Empty,
+}
+
+impl CellType {
+    fn rank(self) -> u8 {
+        match self {
+            CellType::Image => 5,
+            CellType::Code => 4,
+            CellType::List | CellType::Prose | CellType::Heading => 3,
+            CellType::Empty => 0,
+        }
+    }
+}
+
+pub(crate) fn cell_type(cell: &Cell) -> CellType {
+    let mut has_code = false;
+    let mut has_list = false;
+    let mut has_prose = false;
+    let mut has_heading = false;
+    for block in &cell.blocks {
+        match block {
+            Block::Image { .. } => return CellType::Image,
+            Block::CodeBlock { .. } => has_code = true,
+            Block::List { .. } => has_list = true,
+            Block::Paragraph { .. } => has_prose = true,
+            Block::Heading { .. } => has_heading = true,
+        }
+    }
+    if has_code {
+        CellType::Code
+    } else if has_list {
+        CellType::List
+    } else if has_prose {
+        CellType::Prose
+    } else if has_heading {
+        CellType::Heading
+    } else {
+        CellType::Empty
+    }
+}
+
+fn two_cell_constraints(left: &Cell, right: &Cell) -> Vec<Constraint> {
+    let r_left = cell_type(left).rank();
+    let r_right = cell_type(right).rank();
+    if r_left == r_right {
+        vec![Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)]
+    } else if r_left > r_right {
+        vec![Constraint::Ratio(3, 5), Constraint::Ratio(2, 5)]
+    } else {
+        vec![Constraint::Ratio(2, 5), Constraint::Ratio(3, 5)]
+    }
+}
 
 pub fn layout(slide: &Slide, area: Rect) -> Vec<Rect> {
     let n = slide.cells.len();
@@ -28,8 +88,11 @@ pub fn layout(slide: &Slide, area: Rect) -> Vec<Rect> {
     let mut result = Vec::with_capacity(n);
     for (row_idx, &cols_in_row) in rows.iter().enumerate() {
         let cols = cols_in_row as u32;
-        let col_constraints: Vec<Constraint> =
-            (0..cols).map(|_| Constraint::Ratio(1, cols)).collect();
+        let col_constraints: Vec<Constraint> = if n == 2 {
+            two_cell_constraints(&slide.cells[0], &slide.cells[1])
+        } else {
+            (0..cols).map(|_| Constraint::Ratio(1, cols)).collect()
+        };
         let col_rects = Layout::horizontal(col_constraints).split(row_rects[row_idx]);
         for r in col_rects.iter() {
             result.push(*r);
@@ -91,6 +154,63 @@ mod tests {
                 spans: vec![InlineSpan::Text("hello".into())],
                 span: span(),
             }],
+            directives: vec![],
+            span: span(),
+        }
+    }
+
+    fn image_cell() -> Cell {
+        Cell {
+            blocks: vec![Block::Image {
+                src: "x.png".into(),
+                alt: String::new(),
+                meta: None,
+                span: span(),
+            }],
+            directives: vec![],
+            span: span(),
+        }
+    }
+
+    fn code_cell() -> Cell {
+        Cell {
+            blocks: vec![Block::CodeBlock {
+                lang: None,
+                source: "fn main() {}".into(),
+                span: span(),
+            }],
+            directives: vec![],
+            span: span(),
+        }
+    }
+
+    fn list_cell() -> Cell {
+        Cell {
+            blocks: vec![Block::List {
+                ordered: false,
+                items: vec![],
+                span: span(),
+            }],
+            directives: vec![],
+            span: span(),
+        }
+    }
+
+    fn heading_cell() -> Cell {
+        Cell {
+            blocks: vec![Block::Heading {
+                level: 1,
+                spans: vec![InlineSpan::Text("h".into())],
+                span: span(),
+            }],
+            directives: vec![],
+            span: span(),
+        }
+    }
+
+    fn empty_cell() -> Cell {
+        Cell {
+            blocks: vec![],
             directives: vec![],
             span: span(),
         }
@@ -290,5 +410,192 @@ mod tests {
         assert_eq!(row_distribution(9), vec![3, 3, 3]);
         assert_eq!(row_distribution(10), vec![3, 3, 2, 2]);
         assert_eq!(row_distribution(11), vec![3, 3, 3, 2]);
+    }
+
+    #[test]
+    fn cell_type_classifies_each_block_kind() {
+        assert_eq!(cell_type(&image_cell()), CellType::Image);
+        assert_eq!(cell_type(&code_cell()), CellType::Code);
+        assert_eq!(cell_type(&list_cell()), CellType::List);
+        assert_eq!(cell_type(&paragraph_cell()), CellType::Prose);
+        assert_eq!(cell_type(&heading_cell()), CellType::Heading);
+        assert_eq!(cell_type(&empty_cell()), CellType::Empty);
+    }
+
+    #[test]
+    fn cell_type_image_wins_over_other_blocks() {
+        let cell = Cell {
+            blocks: vec![
+                Block::Paragraph {
+                    spans: vec![InlineSpan::Text("p".into())],
+                    span: span(),
+                },
+                Block::Image {
+                    src: "x.png".into(),
+                    alt: String::new(),
+                    meta: None,
+                    span: span(),
+                },
+            ],
+            directives: vec![],
+            span: span(),
+        };
+        assert_eq!(cell_type(&cell), CellType::Image);
+    }
+
+    #[test]
+    fn cell_type_code_wins_over_list_prose_heading() {
+        let cell = Cell {
+            blocks: vec![
+                Block::Heading {
+                    level: 1,
+                    spans: vec![InlineSpan::Text("h".into())],
+                    span: span(),
+                },
+                Block::Paragraph {
+                    spans: vec![InlineSpan::Text("p".into())],
+                    span: span(),
+                },
+                Block::CodeBlock {
+                    lang: None,
+                    source: "x".into(),
+                    span: span(),
+                },
+            ],
+            directives: vec![],
+            span: span(),
+        };
+        assert_eq!(cell_type(&cell), CellType::Code);
+    }
+
+    #[test]
+    fn prose_then_image_splits_40_60() {
+        let slide = slide_with_cells(vec![paragraph_cell(), image_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], Rect::new(0, 0, 40, 20));
+        assert_eq!(rects[1], Rect::new(40, 0, 60, 20));
+    }
+
+    #[test]
+    fn image_then_prose_splits_60_40() {
+        let slide = slide_with_cells(vec![image_cell(), paragraph_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], Rect::new(0, 0, 60, 20));
+        assert_eq!(rects[1], Rect::new(60, 0, 40, 20));
+    }
+
+    #[test]
+    fn code_then_list_splits_60_40() {
+        let slide = slide_with_cells(vec![code_cell(), list_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], Rect::new(0, 0, 60, 20));
+        assert_eq!(rects[1], Rect::new(60, 0, 40, 20));
+    }
+
+    #[test]
+    fn list_then_code_splits_40_60() {
+        let slide = slide_with_cells(vec![list_cell(), code_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], Rect::new(0, 0, 40, 20));
+        assert_eq!(rects[1], Rect::new(40, 0, 60, 20));
+    }
+
+    #[test]
+    fn image_image_splits_50_50() {
+        let slide = slide_with_cells(vec![image_cell(), image_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0], Rect::new(0, 0, 50, 20));
+        assert_eq!(rects[1], Rect::new(50, 0, 50, 20));
+    }
+
+    #[test]
+    fn code_code_splits_50_50() {
+        let slide = slide_with_cells(vec![code_cell(), code_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn heading_then_prose_splits_50_50() {
+        let slide = slide_with_cells(vec![heading_cell(), paragraph_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn list_then_heading_splits_50_50() {
+        let slide = slide_with_cells(vec![list_cell(), heading_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn prose_then_list_splits_50_50() {
+        let slide = slide_with_cells(vec![paragraph_cell(), list_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn empty_then_image_splits_40_60() {
+        let slide = slide_with_cells(vec![empty_cell(), image_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects[0], Rect::new(0, 0, 40, 20));
+        assert_eq!(rects[1], Rect::new(40, 0, 60, 20));
+    }
+
+    #[test]
+    fn empty_then_prose_splits_40_60() {
+        let slide = slide_with_cells(vec![empty_cell(), paragraph_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects[0], Rect::new(0, 0, 40, 20));
+        assert_eq!(rects[1], Rect::new(40, 0, 60, 20));
+    }
+
+    #[test]
+    fn empty_empty_splits_50_50() {
+        let slide = slide_with_cells(vec![empty_cell(), empty_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn weighted_two_cell_preserves_reading_order() {
+        // First cell is the higher-rank one; result[0] still corresponds to cells[0].
+        let slide = slide_with_cells(vec![image_cell(), paragraph_cell()]);
+        let rects = layout(&slide, Rect::new(0, 0, 100, 20));
+        // cells[0] (image) sits on the left at x=0.
+        assert_eq!(rects[0].x, 0);
+        // cells[1] (prose) sits to the right.
+        assert_eq!(rects[1].x, rects[0].width);
+    }
+
+    #[test]
+    fn five_cells_trailing_two_row_stays_equal_split() {
+        // n=5 splits 3+2; the trailing 2-cell row must NOT use the 2-cell weighting.
+        let cells = vec![
+            paragraph_cell(),
+            paragraph_cell(),
+            paragraph_cell(),
+            image_cell(),
+            paragraph_cell(),
+        ];
+        let rects = layout(&slide_with_cells(cells), Rect::new(0, 0, 120, 40));
+        assert_eq!(rects.len(), 5);
+        // Trailing row (indexes 3..5) splits 60/60, not 40/60.
+        assert_eq!(rects[3].width, 60);
+        assert_eq!(rects[4].width, 60);
     }
 }
