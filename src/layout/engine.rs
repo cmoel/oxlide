@@ -1,6 +1,10 @@
 use crate::parser::Slide;
 use ratatui::layout::{Constraint, Layout, Rect};
 
+/// Minimum width for any column in a multi-cell layout. When a proposed column
+/// would be narrower than this, the whole slide falls back to a vertical stack.
+pub(crate) const MIN_COL_WIDTH: u16 = 40;
+
 pub fn layout(slide: &Slide, area: Rect) -> Vec<Rect> {
     let n = slide.cells.len();
     match n {
@@ -10,6 +14,11 @@ pub fn layout(slide: &Slide, area: Rect) -> Vec<Rect> {
     }
 
     let rows = row_distribution(n);
+    let max_cols = *rows.iter().max().expect("multi-cell slide has rows") as u16;
+    if max_cols > 0 && area.width / max_cols < MIN_COL_WIDTH {
+        return vertical_stack(n, area);
+    }
+
     let row_count = rows.len() as u32;
     let row_constraints: Vec<Constraint> = (0..row_count)
         .map(|_| Constraint::Ratio(1, row_count))
@@ -27,6 +36,15 @@ pub fn layout(slide: &Slide, area: Rect) -> Vec<Rect> {
         }
     }
     result
+}
+
+fn vertical_stack(n: usize, area: Rect) -> Vec<Rect> {
+    let row_count = n as u32;
+    let row_constraints: Vec<Constraint> = (0..row_count)
+        .map(|_| Constraint::Ratio(1, row_count))
+        .collect();
+    let rects = Layout::vertical(row_constraints).split(area);
+    rects.iter().copied().collect()
 }
 
 fn row_distribution(n: usize) -> Vec<usize> {
@@ -129,11 +147,11 @@ mod tests {
 
     #[test]
     fn three_cells_split_into_three_columns() {
-        let rects = layout(&slide_with_n(3), Rect::new(0, 0, 99, 20));
+        let rects = layout(&slide_with_n(3), Rect::new(0, 0, 150, 20));
         assert_eq!(rects.len(), 3);
-        assert_eq!(rects[0], Rect::new(0, 0, 33, 20));
-        assert_eq!(rects[1], Rect::new(33, 0, 33, 20));
-        assert_eq!(rects[2], Rect::new(66, 0, 33, 20));
+        assert_eq!(rects[0], Rect::new(0, 0, 50, 20));
+        assert_eq!(rects[1], Rect::new(50, 0, 50, 20));
+        assert_eq!(rects[2], Rect::new(100, 0, 50, 20));
     }
 
     #[test]
@@ -148,7 +166,7 @@ mod tests {
 
     #[test]
     fn five_cells_split_three_plus_two() {
-        let rects = layout(&slide_with_n(5), Rect::new(0, 0, 90, 40));
+        let rects = layout(&slide_with_n(5), Rect::new(0, 0, 120, 40));
         assert_eq!(rects.len(), 5);
         assert_eq!(distinct_y_rows(&rects), 2);
         // Row 0: indexes 0..=2 share y=0
@@ -159,7 +177,7 @@ mod tests {
 
     #[test]
     fn six_cells_split_three_plus_three() {
-        let rects = layout(&slide_with_n(6), Rect::new(0, 0, 90, 40));
+        let rects = layout(&slide_with_n(6), Rect::new(0, 0, 120, 40));
         assert_eq!(rects.len(), 6);
         assert_eq!(distinct_y_rows(&rects), 2);
         assert!(rects[0..3].iter().all(|r| r.y == 0));
@@ -168,7 +186,7 @@ mod tests {
 
     #[test]
     fn seven_cells_rebalance_to_three_two_two() {
-        let rects = layout(&slide_with_n(7), Rect::new(0, 0, 90, 60));
+        let rects = layout(&slide_with_n(7), Rect::new(0, 0, 120, 60));
         assert_eq!(rects.len(), 7);
         assert_eq!(distinct_y_rows(&rects), 3);
         assert!(rects[0..3].iter().all(|r| r.y == 0));
@@ -181,12 +199,86 @@ mod tests {
 
     #[test]
     fn nine_cells_split_three_three_three() {
-        let rects = layout(&slide_with_n(9), Rect::new(0, 0, 90, 60));
+        let rects = layout(&slide_with_n(9), Rect::new(0, 0, 120, 60));
         assert_eq!(rects.len(), 9);
         assert_eq!(distinct_y_rows(&rects), 3);
         assert!(rects[0..3].iter().all(|r| r.y == 0));
         assert!(rects[3..6].iter().all(|r| r.y == 20));
         assert!(rects[6..9].iter().all(|r| r.y == 40));
+    }
+
+    #[test]
+    fn narrow_two_cells_stack_vertically() {
+        // 2 cells in 60-col area (would be 30+30): stack.
+        let rects = layout(&slide_with_n(2), Rect::new(0, 0, 60, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(distinct_y_rows(&rects), 2);
+        assert!(rects.iter().all(|r| r.x == 0 && r.width == 60));
+    }
+
+    #[test]
+    fn wide_two_cells_remain_horizontal() {
+        // 2 cells in 100-col area (50+50): horizontal (unchanged).
+        let rects = layout(&slide_with_n(2), Rect::new(0, 0, 100, 20));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(distinct_y_rows(&rects), 1);
+        assert_eq!(rects[0].width, 50);
+        assert_eq!(rects[1].width, 50);
+    }
+
+    #[test]
+    fn narrow_three_cells_stack_vertically() {
+        // 3 cells in 90-col area (would be 30 each): stack.
+        let rects = layout(&slide_with_n(3), Rect::new(0, 0, 90, 30));
+        assert_eq!(rects.len(), 3);
+        assert_eq!(distinct_y_rows(&rects), 3);
+        assert!(rects.iter().all(|r| r.x == 0 && r.width == 90));
+    }
+
+    #[test]
+    fn narrow_four_cells_stack_not_grid() {
+        // 4 cells in 70-col area: vertical stack of 4, not 2×2 grid.
+        let rects = layout(&slide_with_n(4), Rect::new(0, 0, 70, 40));
+        assert_eq!(rects.len(), 4);
+        assert_eq!(distinct_y_rows(&rects), 4);
+        assert!(rects.iter().all(|r| r.x == 0 && r.width == 70));
+    }
+
+    #[test]
+    fn three_cells_at_exact_threshold_remain_horizontal() {
+        // 3 cells in 120-col area (40 each): three columns, no stack.
+        let rects = layout(&slide_with_n(3), Rect::new(0, 0, 120, 20));
+        assert_eq!(rects.len(), 3);
+        assert_eq!(distinct_y_rows(&rects), 1);
+        assert_eq!(rects[0], Rect::new(0, 0, 40, 20));
+        assert_eq!(rects[1], Rect::new(40, 0, 40, 20));
+        assert_eq!(rects[2], Rect::new(80, 0, 40, 20));
+    }
+
+    #[test]
+    fn narrow_seven_cells_stack_vertically() {
+        // n=7 in an area where max row (3 cols) would be narrow: stack all 7.
+        let rects = layout(&slide_with_n(7), Rect::new(0, 0, 90, 70));
+        assert_eq!(rects.len(), 7);
+        assert_eq!(distinct_y_rows(&rects), 7);
+        assert!(rects.iter().all(|r| r.x == 0 && r.width == 90));
+    }
+
+    #[test]
+    fn very_narrow_single_column_area_still_stacks() {
+        // Area narrower than MIN_COL_WIDTH even for one column: still stack.
+        let rects = layout(&slide_with_n(2), Rect::new(0, 0, 20, 10));
+        assert_eq!(rects.len(), 2);
+        assert_eq!(distinct_y_rows(&rects), 2);
+        assert!(rects.iter().all(|r| r.x == 0 && r.width == 20));
+    }
+
+    #[test]
+    fn one_cell_unaffected_by_narrow_area() {
+        // 1-cell case ignores MIN_COL_WIDTH entirely.
+        let area = Rect::new(0, 0, 10, 10);
+        let rects = layout(&slide_with_cells(vec![paragraph_cell()]), area);
+        assert_eq!(rects, vec![area]);
     }
 
     #[test]
