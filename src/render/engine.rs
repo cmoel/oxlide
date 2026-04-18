@@ -41,11 +41,31 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
                 .wrap(Wrap { trim: true })
                 .render(area, buf);
         }
-        Block::List { .. } | Block::CodeBlock { .. } => {}
+        Block::List { .. } => {}
+        Block::CodeBlock { lang, source, .. } => {
+            render_code(lang, source, area, buf, theme);
+        }
         Block::Image { src, alt, .. } => {
             render_image(src, alt, area, buf, theme);
         }
     }
+}
+
+fn render_code(_lang: &Option<String>, source: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let border_style = theme.prose.add_modifier(ratatui::style::Modifier::DIM);
+    let block = WidgetBlock::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    Paragraph::new(source.to_string())
+        .style(theme.code)
+        .render(inner, buf);
 }
 
 fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -270,25 +290,108 @@ mod tests {
     }
 
     #[test]
-    fn list_and_codeblock_blocks_are_noops() {
+    fn list_block_is_noop() {
         let theme = Theme::default();
         let list = Block::List {
             ordered: false,
             items: vec![],
             span: span(),
         };
-        let code = Block::CodeBlock {
-            lang: None,
-            source: "fn main() {}".into(),
-            span: span(),
-        };
-        let slide = slide_with_cell(vec![list, code]);
+        let slide = slide_with_cell(vec![list]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
         render_slide(&slide, area, &mut buf, &theme);
+    }
 
-        let text = buffer_text(&buf);
-        assert!(!text.contains("fn main"));
+    fn code_block(source: &str) -> Block {
+        Block::CodeBlock {
+            lang: None,
+            source: source.into(),
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn renders_code_block_preserving_whitespace() {
+        let theme = Theme::default();
+        let src = "fn main() {\n    println!(\"hi\");\n}";
+        let slide = slide_with_cell(vec![code_block(src)]);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let find_row = |needle: &str| -> Option<(u16, String)> {
+            (0..buf.area.height).find_map(|y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                if row.contains(needle) { Some((y, row)) } else { None }
+            })
+        };
+
+        let (_, main_row) = find_row("fn main()").expect("fn main() row");
+        assert!(main_row.starts_with("fn main()"), "no leading indent on line 1; got {:?}", main_row);
+
+        let (_, println_row) = find_row("println!").expect("println row");
+        assert!(
+            println_row.starts_with("    println!"),
+            "indentation not preserved; got {:?}",
+            println_row
+        );
+
+        let (_, close_row) = find_row("}").expect("closing brace row");
+        assert!(close_row.starts_with("}"), "got {:?}", close_row);
+
+        let code_x = main_row.find("fn").unwrap() as u16;
+        let code_y = (0..buf.area.height)
+            .find(|&y| {
+                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                row.contains("fn main()")
+            })
+            .unwrap();
+        assert_eq!(buf[(code_x, code_y)].fg, theme.code.fg.unwrap());
+    }
+
+    #[test]
+    fn code_block_has_visible_frame() {
+        let theme = Theme::default();
+        let slide = slide_with_cell(vec![code_block("x")]);
+        let area = Rect::new(0, 0, 20, 3);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        let bottom: String = (0..buf.area.width)
+            .map(|x| buf[(x, buf.area.height - 1)].symbol())
+            .collect();
+        assert!(top.contains("─"), "top border missing; got {:?}", top);
+        assert!(bottom.contains("─"), "bottom border missing; got {:?}", bottom);
+    }
+
+    #[test]
+    fn code_block_clips_long_lines_without_wrapping() {
+        let theme = Theme::default();
+        let long = "a".repeat(80);
+        let slide = slide_with_cell(vec![code_block(&long)]);
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let a_rows = rows.iter().filter(|r| r.contains("aaaa")).count();
+        assert_eq!(a_rows, 1, "long line should not wrap; rows={:?}", rows);
+    }
+
+    #[test]
+    fn empty_code_block_does_not_panic() {
+        let theme = Theme::default();
+        let slide = slide_with_cell(vec![code_block("")]);
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.contains("─"), "frame should render even with empty source");
     }
 
     #[test]
