@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
 
 use crate::layout::layout;
-use crate::parser::{Block, Cell, InlineSpan, Slide};
+use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide};
 use crate::render::theme::Theme;
 
 pub fn render_slide(slide: &Slide, area: Rect, buf: &mut Buffer, theme: &Theme) {
@@ -41,7 +41,9 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
                 .wrap(Wrap { trim: true })
                 .render(area, buf);
         }
-        Block::List { .. } => {}
+        Block::List { ordered, items, .. } => {
+            render_list(*ordered, items, 0, area, buf, theme);
+        }
         Block::CodeBlock { lang, source, .. } => {
             render_code(lang, source, area, buf, theme);
         }
@@ -83,6 +85,122 @@ fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Them
     lines.push(Line::styled(src.to_string(), muted));
 
     Paragraph::new(lines).render(inner, buf);
+}
+
+fn render_list(
+    ordered: bool,
+    items: &[ListItem],
+    depth: u16,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) -> u16 {
+    if items.is_empty() || area.width == 0 || area.height == 0 {
+        return 0;
+    }
+    let indent = depth.saturating_mul(2);
+    let mut y_offset: u16 = 0;
+
+    for (idx, item) in items.iter().enumerate() {
+        if y_offset >= area.height {
+            break;
+        }
+        let marker_text = if ordered {
+            format!("{}. ", idx + 1)
+        } else {
+            "• ".to_string()
+        };
+        let marker_width = marker_text.chars().count() as u16;
+
+        let mut first_block = true;
+        for block in &item.blocks {
+            if y_offset >= area.height {
+                break;
+            }
+            match block {
+                Block::List {
+                    ordered: inner_ordered,
+                    items: inner_items,
+                    ..
+                } => {
+                    let nested = Rect {
+                        x: area.x,
+                        y: area.y + y_offset,
+                        width: area.width,
+                        height: area.height - y_offset,
+                    };
+                    let used = render_list(
+                        *inner_ordered,
+                        inner_items,
+                        depth + 1,
+                        nested,
+                        buf,
+                        theme,
+                    );
+                    y_offset = y_offset.saturating_add(used);
+                }
+                Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
+                    let ctx = ListItemLine {
+                        spans,
+                        is_first_block: first_block,
+                        marker_text: &marker_text,
+                        marker_width,
+                        indent,
+                        area,
+                        y_offset,
+                    };
+                    render_list_item_line(&ctx, buf, theme);
+                    y_offset = y_offset.saturating_add(1);
+                }
+                _ => {
+                    y_offset = y_offset.saturating_add(1);
+                }
+            }
+            first_block = false;
+        }
+    }
+    y_offset
+}
+
+struct ListItemLine<'a> {
+    spans: &'a [InlineSpan],
+    is_first_block: bool,
+    marker_text: &'a str,
+    marker_width: u16,
+    indent: u16,
+    area: Rect,
+    y_offset: u16,
+}
+
+fn render_list_item_line(ctx: &ListItemLine<'_>, buf: &mut Buffer, theme: &Theme) {
+    let prefix_width = ctx.indent.saturating_add(ctx.marker_width);
+    if prefix_width >= ctx.area.width {
+        return;
+    }
+    let row_y = ctx.area.y + ctx.y_offset;
+
+    if ctx.is_first_block {
+        let marker_rect = Rect {
+            x: ctx.area.x + ctx.indent,
+            y: row_y,
+            width: ctx.marker_width,
+            height: 1,
+        };
+        Paragraph::new(ctx.marker_text.to_string())
+            .style(theme.list_marker)
+            .render(marker_rect, buf);
+    }
+
+    let content_rect = Rect {
+        x: ctx.area.x + prefix_width,
+        y: row_y,
+        width: ctx.area.width - prefix_width,
+        height: 1,
+    };
+    let line = inline_to_line(ctx.spans, theme);
+    Paragraph::new(line)
+        .style(theme.prose)
+        .render(content_rect, buf);
 }
 
 pub fn inline_to_line(spans: &[InlineSpan], theme: &Theme) -> Line<'static> {
@@ -129,7 +247,7 @@ fn collect_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::{Block, Cell, InlineSpan, Slide, SourceSpan};
+    use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide, SourceSpan};
     use ratatui::style::Modifier;
 
     fn span() -> SourceSpan {
@@ -289,18 +407,154 @@ mod tests {
         render_slide(&slide, area, &mut buf, &theme);
     }
 
-    #[test]
-    fn list_block_is_noop() {
-        let theme = Theme::default();
-        let list = Block::List {
-            ordered: false,
-            items: vec![],
+    fn list_item(blocks: Vec<Block>) -> ListItem {
+        ListItem { blocks, span: span() }
+    }
+
+    fn simple_item(text: &str) -> ListItem {
+        list_item(vec![paragraph(vec![InlineSpan::Text(text.into())])])
+    }
+
+    fn list(ordered: bool, items: Vec<ListItem>) -> Block {
+        Block::List {
+            ordered,
+            items,
             span: span(),
-        };
-        let slide = slide_with_cell(vec![list]);
+        }
+    }
+
+    fn row_at(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn empty_list_does_not_panic() {
+        let theme = Theme::default();
+        let slide = slide_with_cell(vec![list(false, vec![])]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
         render_slide(&slide, area, &mut buf, &theme);
+    }
+
+    #[test]
+    fn renders_unordered_list_with_bullet_markers() {
+        let theme = Theme::default();
+        let block = list(
+            false,
+            vec![
+                simple_item("alpha"),
+                simple_item("beta"),
+                simple_item("gamma"),
+            ],
+        );
+        let slide = slide_with_cell(vec![block]);
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let r0 = row_at(&buf, 0);
+        let r1 = row_at(&buf, 1);
+        let r2 = row_at(&buf, 2);
+        assert!(r0.starts_with("• alpha"), "row 0: {:?}", r0);
+        assert!(r1.starts_with("• beta"), "row 1: {:?}", r1);
+        assert!(r2.starts_with("• gamma"), "row 2: {:?}", r2);
+
+        assert_eq!(buf[(0, 0)].symbol(), "•");
+        assert_eq!(buf[(0, 0)].fg, theme.list_marker.fg.unwrap());
+    }
+
+    #[test]
+    fn renders_ordered_list_with_numbered_markers() {
+        let theme = Theme::default();
+        let block = list(
+            true,
+            vec![
+                simple_item("first"),
+                simple_item("second"),
+                simple_item("third"),
+            ],
+        );
+        let slide = slide_with_cell(vec![block]);
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let r0 = row_at(&buf, 0);
+        let r1 = row_at(&buf, 1);
+        let r2 = row_at(&buf, 2);
+        assert!(r0.starts_with("1. first"), "row 0: {:?}", r0);
+        assert!(r1.starts_with("2. second"), "row 1: {:?}", r1);
+        assert!(r2.starts_with("3. third"), "row 2: {:?}", r2);
+
+        assert_eq!(buf[(0, 0)].symbol(), "1");
+        assert_eq!(buf[(0, 0)].fg, theme.list_marker.fg.unwrap());
+    }
+
+    #[test]
+    fn renders_nested_list_indented() {
+        let theme = Theme::default();
+        let inner = list(false, vec![simple_item("inner")]);
+        let outer_item = list_item(vec![
+            paragraph(vec![InlineSpan::Text("outer".into())]),
+            inner,
+        ]);
+        let block = list(false, vec![outer_item]);
+        let slide = slide_with_cell(vec![block]);
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let r0 = row_at(&buf, 0);
+        let r1 = row_at(&buf, 1);
+        assert!(r0.starts_with("• outer"), "row 0: {:?}", r0);
+        assert!(r1.starts_with("  • inner"), "row 1: {:?}", r1);
+
+        assert_eq!(buf[(0, 0)].symbol(), "•");
+        assert_eq!(buf[(2, 1)].symbol(), "•");
+    }
+
+    #[test]
+    fn renders_list_items_with_inline_styles() {
+        let theme = Theme::default();
+        let spans = vec![
+            InlineSpan::Strong(vec![InlineSpan::Text("bold".into())]),
+            InlineSpan::Text(" ".into()),
+            InlineSpan::Emphasis(vec![InlineSpan::Text("italic".into())]),
+            InlineSpan::Text(" ".into()),
+            InlineSpan::Code("code".into()),
+            InlineSpan::Text(" ".into()),
+            InlineSpan::Link {
+                url: "https://example.com".into(),
+                text: vec![InlineSpan::Text("link".into())],
+            },
+        ];
+        let block = list(
+            false,
+            vec![list_item(vec![Block::Paragraph { spans, span: span() }])],
+        );
+        let slide = slide_with_cell(vec![block]);
+        let area = Rect::new(0, 0, 60, 3);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let row = row_at(&buf, 0);
+        assert!(row.contains("bold"), "row: {:?}", row);
+        assert!(row.contains("italic"));
+        assert!(row.contains("code"));
+        assert!(row.contains("link"));
+
+        let bold_x = row.find("bold").unwrap() as u16;
+        assert!(buf[(bold_x, 0)].modifier.contains(Modifier::BOLD));
+
+        let italic_x = row.find("italic").unwrap() as u16;
+        assert!(buf[(italic_x, 0)].modifier.contains(Modifier::ITALIC));
+
+        let code_x = row.find("code").unwrap() as u16;
+        assert_eq!(buf[(code_x, 0)].fg, theme.code.fg.unwrap());
+
+        let link_x = row.find("link").unwrap() as u16;
+        assert_eq!(buf[(link_x, 0)].fg, theme.link.fg.unwrap());
+        assert!(buf[(link_x, 0)].modifier.contains(Modifier::UNDERLINED));
     }
 
     fn code_block(source: &str) -> Block {
