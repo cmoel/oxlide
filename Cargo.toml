@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+keepawake = "0.6.0"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
