@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
 
 use crate::layout::layout;
 use crate::parser::{Block, Cell, InlineSpan, Slide};
@@ -41,8 +41,28 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
                 .wrap(Wrap { trim: true })
                 .render(area, buf);
         }
-        Block::List { .. } | Block::CodeBlock { .. } | Block::Image { .. } => {}
+        Block::List { .. } | Block::CodeBlock { .. } => {}
+        Block::Image { src, alt, .. } => {
+            render_image(src, alt, area, buf, theme);
+        }
     }
+}
+
+fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let block = WidgetBlock::default()
+        .borders(Borders::ALL)
+        .title(" image ");
+    let inner = block.inner(area);
+    block.render(area, buf);
+
+    let muted = theme.prose.add_modifier(ratatui::style::Modifier::DIM);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if !alt.is_empty() {
+        lines.push(Line::styled(alt.to_string(), theme.image_placeholder));
+    }
+    lines.push(Line::styled(src.to_string(), muted));
+
+    Paragraph::new(lines).render(inner, buf);
 }
 
 pub fn inline_to_line(spans: &[InlineSpan], theme: &Theme) -> Line<'static> {
@@ -250,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn list_codeblock_image_blocks_are_noops() {
+    fn list_and_codeblock_blocks_are_noops() {
         let theme = Theme::default();
         let list = Block::List {
             ordered: false,
@@ -262,20 +282,89 @@ mod tests {
             source: "fn main() {}".into(),
             span: span(),
         };
-        let image = Block::Image {
-            src: "x.png".into(),
-            alt: "x".into(),
-            meta: None,
-            span: span(),
-        };
-        let slide = slide_with_cell(vec![list, code, image]);
+        let slide = slide_with_cell(vec![list, code]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
         render_slide(&slide, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(!text.contains("fn main"));
-        assert!(!text.contains("x.png"));
+    }
+
+    #[test]
+    fn renders_image_block_with_alt_and_src() {
+        let theme = Theme::default();
+        let image = Block::Image {
+            src: "cat.png".into(),
+            alt: "a cat".into(),
+            meta: None,
+            span: span(),
+        };
+        let slide = slide_with_cell(vec![image]);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("a cat"), "alt text missing; got {:?}", text);
+        assert!(text.contains("cat.png"), "src missing; got {:?}", text);
+        assert!(text.contains("image"), "title missing; got {:?}", text);
+
+        let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            top.contains("─") || top.contains("┌"),
+            "top border missing; got {:?}",
+            top
+        );
+
+        let alt_row = (0..buf.area.height).find(|&y| {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            row.contains("a cat")
+        });
+        let alt_y = alt_row.expect("alt row present");
+        let alt_row_str: String = (0..buf.area.width)
+            .map(|x| buf[(x, alt_y)].symbol())
+            .collect();
+        let alt_x = alt_row_str.find("a cat").unwrap() as u16;
+        assert_eq!(
+            buf[(alt_x, alt_y)].fg,
+            theme.image_placeholder.fg.unwrap(),
+            "alt text should use image_placeholder style"
+        );
+    }
+
+    #[test]
+    fn renders_image_block_with_empty_alt() {
+        let theme = Theme::default();
+        let image = Block::Image {
+            src: "cat.png".into(),
+            alt: String::new(),
+            meta: None,
+            span: span(),
+        };
+        let slide = slide_with_cell(vec![image]);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("cat.png"), "src missing; got {:?}", text);
+        assert!(text.contains("image"), "title missing; got {:?}", text);
+    }
+
+    #[test]
+    fn narrow_image_area_does_not_panic() {
+        let theme = Theme::default();
+        let image = Block::Image {
+            src: "cat.png".into(),
+            alt: "a cat".into(),
+            meta: None,
+            span: span(),
+        };
+        let slide = slide_with_cell(vec![image]);
+        let area = Rect::new(0, 0, 4, 3);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, area, &mut buf, &theme);
     }
 
     #[test]
