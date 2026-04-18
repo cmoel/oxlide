@@ -1,3 +1,4 @@
+pub mod cli;
 pub mod layout;
 pub mod parser;
 pub mod render;

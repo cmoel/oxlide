@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 pulldown-cmark = { version = "0.13", default-features = false }
 ratatui = "0.30"
