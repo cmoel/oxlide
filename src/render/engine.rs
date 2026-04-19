@@ -6,10 +6,22 @@ use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
 
 use crate::layout::layout;
 use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide};
+use crate::render::composition::{compute_inner_area, is_hero_slide, render_hero};
 use crate::render::theme::Theme;
 
 pub fn render_slide(slide: &Slide, area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let rects = layout(slide, area);
+    if slide.cells.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+    let (inner, _chrome) = compute_inner_area(area, theme);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if is_hero_slide(slide) {
+        render_hero(slide, inner, buf, theme);
+        return;
+    }
+    let rects = layout(slide, inner);
     for (cell, rect) in slide.cells.iter().zip(rects) {
         render_cell(cell, rect, buf, theme);
     }
@@ -19,10 +31,30 @@ pub fn render_cell(cell: &Cell, area: Rect, buf: &mut Buffer, theme: &Theme) {
     if cell.blocks.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
-    let constraints: Vec<Constraint> = cell.blocks.iter().map(|_| Constraint::Min(1)).collect();
+
+    // Interleave a blank spacer row after any H1 that has a following block,
+    // so the heading breathes above the body content.
+    let mut entries: Vec<Option<usize>> = Vec::with_capacity(cell.blocks.len() * 2);
+    for (i, block) in cell.blocks.iter().enumerate() {
+        entries.push(Some(i));
+        if matches!(block, Block::Heading { level: 1, .. }) && i + 1 < cell.blocks.len() {
+            entries.push(None);
+        }
+    }
+
+    let constraints: Vec<Constraint> = entries
+        .iter()
+        .map(|e| match e {
+            Some(_) => Constraint::Min(1),
+            None => Constraint::Length(1),
+        })
+        .collect();
+
     let rects = Layout::vertical(constraints).split(area);
-    for (block, rect) in cell.blocks.iter().zip(rects.iter()) {
-        render_block(block, *rect, buf, theme);
+    for (entry, rect) in entries.iter().zip(rects.iter()) {
+        if let Some(i) = entry {
+            render_block(&cell.blocks[*i], *rect, buf, theme);
+        }
     }
 }
 
@@ -290,6 +322,16 @@ mod tests {
         s
     }
 
+    fn find_char_position(buf: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if let Some(x) = row.find(needle) {
+                return Some((x as u16, y));
+            }
+        }
+        None
+    }
+
     #[test]
     fn renders_heading_text_with_heading_style() {
         let theme = Theme::default();
@@ -302,7 +344,8 @@ mod tests {
         assert!(text.contains("Hello"), "buffer should contain heading text; got {:?}", text);
 
         let expected = theme.heading[0];
-        let cell = &buf[(0, 0)];
+        let (x, y) = find_char_position(&buf, "Hello").expect("heading rendered");
+        let cell = &buf[(x, y)];
         assert_eq!(cell.symbol(), "H");
         assert_eq!(cell.fg, expected.fg.unwrap());
         assert!(cell.modifier.contains(Modifier::BOLD));
@@ -344,6 +387,8 @@ mod tests {
     #[test]
     fn renders_heading_and_paragraph_stacked() {
         let theme = Theme::default();
+        // Hero slide ([H1, P]) renders heading centered with one blank row and
+        // the subtitle below. Body must still appear after heading.
         let slide = slide_with_cell(vec![
             heading(1, "Title"),
             paragraph(vec![InlineSpan::Text("Body text".into())]),
@@ -356,18 +401,14 @@ mod tests {
         assert!(text.contains("Title"));
         assert!(text.contains("Body text"));
 
-        let title_line: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(title_line.contains("Title"));
-
-        let mut body_row = None;
-        for y in 1..buf.area.height {
-            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-            if row.contains("Body text") {
-                body_row = Some(y);
-                break;
-            }
-        }
-        assert!(body_row.is_some(), "paragraph should render below heading");
+        let (_, title_y) = find_char_position(&buf, "Title").expect("title rendered");
+        let (_, body_y) = find_char_position(&buf, "Body text").expect("body rendered");
+        assert!(
+            body_y > title_y,
+            "body ({}) should render after heading ({})",
+            body_y,
+            title_y
+        );
     }
 
     #[test]
@@ -455,12 +496,13 @@ mod tests {
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
         let r2 = row_at(&buf, 2);
-        assert!(r0.starts_with("• alpha"), "row 0: {:?}", r0);
-        assert!(r1.starts_with("• beta"), "row 1: {:?}", r1);
-        assert!(r2.starts_with("• gamma"), "row 2: {:?}", r2);
+        assert!(r0.contains("• alpha"), "row 0: {:?}", r0);
+        assert!(r1.contains("• beta"), "row 1: {:?}", r1);
+        assert!(r2.contains("• gamma"), "row 2: {:?}", r2);
 
-        assert_eq!(buf[(0, 0)].symbol(), "•");
-        assert_eq!(buf[(0, 0)].fg, theme.list_marker.fg.unwrap());
+        let bullet_x = r0.find("•").expect("bullet on row 0") as u16;
+        assert_eq!(buf[(bullet_x, 0)].symbol(), "•");
+        assert_eq!(buf[(bullet_x, 0)].fg, theme.list_marker.fg.unwrap());
     }
 
     #[test]
@@ -482,12 +524,13 @@ mod tests {
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
         let r2 = row_at(&buf, 2);
-        assert!(r0.starts_with("1. first"), "row 0: {:?}", r0);
-        assert!(r1.starts_with("2. second"), "row 1: {:?}", r1);
-        assert!(r2.starts_with("3. third"), "row 2: {:?}", r2);
+        assert!(r0.contains("1. first"), "row 0: {:?}", r0);
+        assert!(r1.contains("2. second"), "row 1: {:?}", r1);
+        assert!(r2.contains("3. third"), "row 2: {:?}", r2);
 
-        assert_eq!(buf[(0, 0)].symbol(), "1");
-        assert_eq!(buf[(0, 0)].fg, theme.list_marker.fg.unwrap());
+        let marker_x = r0.find("1.").expect("marker on row 0") as u16;
+        assert_eq!(buf[(marker_x, 0)].symbol(), "1");
+        assert_eq!(buf[(marker_x, 0)].fg, theme.list_marker.fg.unwrap());
     }
 
     #[test]
@@ -506,11 +549,14 @@ mod tests {
 
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
-        assert!(r0.starts_with("• outer"), "row 0: {:?}", r0);
-        assert!(r1.starts_with("  • inner"), "row 1: {:?}", r1);
+        assert!(r0.contains("• outer"), "row 0: {:?}", r0);
+        assert!(r1.contains("  • inner"), "row 1: {:?}", r1);
 
-        assert_eq!(buf[(0, 0)].symbol(), "•");
-        assert_eq!(buf[(2, 1)].symbol(), "•");
+        let outer_x = r0.find("•").expect("outer bullet on row 0") as u16;
+        let inner_x = r1.find("•").expect("inner bullet on row 1") as u16;
+        assert_eq!(buf[(outer_x, 0)].symbol(), "•");
+        assert_eq!(buf[(inner_x, 1)].symbol(), "•");
+        assert_eq!(inner_x, outer_x + 2, "inner bullet indented by 2 cells");
     }
 
     #[test]
@@ -581,27 +627,24 @@ mod tests {
             })
         };
 
-        let (_, main_row) = find_row("fn main()").expect("fn main() row");
-        assert!(main_row.starts_with("fn main()"), "no leading indent on line 1; got {:?}", main_row);
-
+        let (main_y, main_row) = find_row("fn main()").expect("fn main() row");
         let (_, println_row) = find_row("println!").expect("println row");
-        assert!(
-            println_row.starts_with("    println!"),
-            "indentation not preserved; got {:?}",
-            println_row
-        );
-
         let (_, close_row) = find_row("}").expect("closing brace row");
-        assert!(close_row.starts_with("}"), "got {:?}", close_row);
 
-        let code_x = main_row.find("fn").unwrap() as u16;
-        let code_y = (0..buf.area.height)
-            .find(|&y| {
-                let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-                row.contains("fn main()")
-            })
-            .unwrap();
-        assert_eq!(buf[(code_x, code_y)].fg, theme.code.fg.unwrap());
+        let fn_x = main_row.find("fn main").expect("fn main x") as u16;
+        let println_x = println_row.find("println").expect("println x") as u16;
+        let close_x = close_row.find('}').expect("brace x") as u16;
+
+        assert_eq!(
+            println_x,
+            fn_x + 4,
+            "four-space indent preserved (fn at {}, println at {})",
+            fn_x,
+            println_x
+        );
+        assert_eq!(close_x, fn_x, "closing brace unindented");
+
+        assert_eq!(buf[(fn_x, main_y)].fg, theme.code.fg.unwrap());
     }
 
     #[test]

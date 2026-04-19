@@ -7,6 +7,7 @@ pub struct Theme {
     pub code: Style,
     pub list_marker: Style,
     pub image_placeholder: Style,
+    pub chrome_rows: u16,
 }
 
 impl Default for Theme {
@@ -30,6 +31,7 @@ impl Default for Theme {
             image_placeholder: Style::new()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::ITALIC),
+            chrome_rows: 0,
         }
     }
 }
