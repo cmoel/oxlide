@@ -6,7 +6,8 @@ use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr;
 
 use oxlide::parser::{Block, InlineSpan, SlideDeck};
-use oxlide::render::{Theme, compute_inner_area, render_slide};
+use oxlide::render::theme::registry;
+use oxlide::render::{ChromeSpec, Theme, compute_inner_area, render_slide};
 
 const CANVAS_WIDTH: u16 = 120;
 const CANVAS_HEIGHT: u16 = 40;
@@ -140,9 +141,10 @@ fn every_fixture_renders() {
 
         let mut any_non_empty = false;
         let mut combined = String::new();
-        for slide in &deck.slides {
+        let total = deck.slides.len();
+        for (idx, slide) in deck.slides.iter().enumerate() {
             let mut buf = Buffer::empty(area);
-            render_slide(slide, area, &mut buf, &theme);
+            render_slide(slide, idx, total, area, &mut buf, &theme);
             if has_non_space_cell(&buf) {
                 any_non_empty = true;
             }
@@ -184,7 +186,7 @@ fn render_to_buffer(source: &str, area: Rect) -> Buffer {
     let theme = Theme::paper_white();
     let mut buf = Buffer::empty(area);
     let slide = deck.slides.first().expect("at least one slide");
-    render_slide(slide, area, &mut buf, &theme);
+    render_slide(slide, 0, deck.slides.len(), area, &mut buf, &theme);
     buf
 }
 
@@ -212,13 +214,14 @@ fn padding_at_120_cols_matches_acceptance_range() {
 }
 
 #[test]
-fn chrome_rows_zero_is_a_noop() {
+fn paper_white_reserves_two_chrome_rows_by_default() {
     let area = Rect::new(0, 0, 120, 40);
     let theme = Theme::paper_white();
-    assert_eq!(theme.chrome_rows, 0, "default theme reserves no chrome");
+    assert_eq!(theme.chrome_rows, 2, "paper-white reserves 2 chrome rows");
+    assert!(matches!(theme.chrome, ChromeSpec::BottomRule));
     let (inner, chrome) = compute_inner_area(area, &theme);
-    assert_eq!(inner.height, 40);
-    assert_eq!(chrome.height, 0);
+    assert_eq!(inner.height, 38);
+    assert_eq!(chrome.height, 2);
 }
 
 #[test]
@@ -368,11 +371,11 @@ fn same_slide_rerendered_at_different_sizes_stays_correct() {
 
     let a1 = Rect::new(0, 0, 40, 20);
     let mut buf1 = Buffer::empty(a1);
-    render_slide(slide, a1, &mut buf1, &theme);
+    render_slide(slide, 0, 1, a1, &mut buf1, &theme);
 
     let a2 = Rect::new(0, 0, 80, 40);
     let mut buf2 = Buffer::empty(a2);
-    render_slide(slide, a2, &mut buf2, &theme);
+    render_slide(slide, 0, 1, a2, &mut buf2, &theme);
 
     let (y1, row1) = find_row(&buf1, "Resize").expect("40x20 heading");
     let (y2, row2) = find_row(&buf2, "Resize").expect("80x40 heading");
@@ -406,12 +409,245 @@ fn render_at_40x20_after_80x40_is_independent() {
 
     let big = Rect::new(0, 0, 80, 40);
     let mut big_buf = Buffer::empty(big);
-    render_slide(slide, big, &mut big_buf, &theme);
+    render_slide(slide, 0, 1, big, &mut big_buf, &theme);
 
     let small = Rect::new(0, 0, 40, 20);
     let mut small_buf = Buffer::empty(small);
-    render_slide(slide, small, &mut small_buf, &theme);
+    render_slide(slide, 0, 1, small, &mut small_buf, &theme);
 
     let (y, _) = find_row(&small_buf, "Sticky").expect("small heading");
     assert!((8..=10).contains(&y), "heading row in small buf was {}", y);
+}
+
+// -------------------------------------------------------------------------
+// Paper-white theme acceptance tests (oxlide-1x2).
+// -------------------------------------------------------------------------
+
+#[test]
+fn registry_get_paper_white_matches_declared_spec() {
+    let t = registry::get("paper-white").expect("paper-white in registry");
+    assert_eq!(t.name, "paper-white");
+    assert_eq!(t.chrome_rows, 2);
+    assert!(matches!(t.chrome, ChromeSpec::BottomRule));
+}
+
+#[test]
+fn paper_white_bottom_rule_spans_inner_width_at_area_height_minus_two() {
+    let area = Rect::new(0, 0, 80, 24);
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# Only\n").unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    let (inner, _) = compute_inner_area(area, &theme);
+    let rule_y = area.height - 2;
+    for x in inner.x..inner.x + inner.width {
+        assert_eq!(
+            buf[(x, rule_y)].symbol(),
+            "─",
+            "rule cell missing at x={}",
+            x
+        );
+    }
+    // Cells outside inner width at the rule row are untouched.
+    for x in 0..inner.x {
+        assert_ne!(buf[(x, rule_y)].symbol(), "─", "rule bled into left pad at x={}", x);
+    }
+}
+
+#[test]
+fn paper_white_counter_centered_on_final_row_single_slide() {
+    let area = Rect::new(0, 0, 80, 24);
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# Only\n").unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    let counter_y = area.height - 1;
+    let row = row_string(&buf, counter_y);
+    assert!(row.contains("1 / 1"), "counter row was {:?}", row);
+
+    // Confirm it's styled with chrome_dim (muted gray).
+    let start = row.find("1 / 1").unwrap() as u16;
+    assert_eq!(buf[(start, counter_y)].fg, theme.chrome_dim.fg.unwrap());
+}
+
+#[test]
+fn paper_white_counter_reflects_slide_index_and_total() {
+    let area = Rect::new(0, 0, 80, 24);
+    let theme = Theme::paper_white();
+    let src = "# A\n\n---\n\n# B\n\n---\n\n# C\n\n---\n\n# D\n\n---\n\n# E\n";
+    let deck = oxlide::parse_deck(src).unwrap();
+    assert_eq!(deck.slides.len(), 5);
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[2], 2, 5, area, &mut buf, &theme);
+
+    let row = row_string(&buf, area.height - 1);
+    assert!(row.contains("3 / 5"), "counter row was {:?}", row);
+}
+
+#[test]
+fn paper_white_bg_invariant_every_cell_is_reset() {
+    let area = Rect::new(0, 0, 80, 24);
+    let theme = Theme::paper_white();
+    let src = "# Title\n\n\
+               Regular **bold** *italic* `code` and a [link](https://x).\n\n\
+               - first\n- second\n\n\
+               ```rust\nfn main() {}\n```\n";
+    let deck = oxlide::parse_deck(src).unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = &buf[(x, y)];
+            assert_eq!(
+                cell.bg,
+                ratatui::style::Color::Reset,
+                "cell ({},{}) bg = {:?}, symbol = {:?}",
+                x,
+                y,
+                cell.bg,
+                cell.symbol()
+            );
+        }
+    }
+}
+
+#[test]
+fn paper_white_chrome_redraws_correctly_across_sizes() {
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# R\n").unwrap();
+    let slide = &deck.slides[0];
+
+    for (w, h) in [(120u16, 40u16), (60, 30)] {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_slide(slide, 0, 1, area, &mut buf, &theme);
+
+        let (inner, chrome) = compute_inner_area(area, &theme);
+        assert_eq!(chrome.height, 2, "{}x{} chrome rows", w, h);
+
+        let rule_y = h - 2;
+        for x in inner.x..inner.x + inner.width {
+            assert_eq!(
+                buf[(x, rule_y)].symbol(),
+                "─",
+                "{}x{} rule missing at x={}",
+                w,
+                h,
+                x
+            );
+        }
+
+        let counter_y = h - 1;
+        let row = row_string(&buf, counter_y);
+        assert!(
+            row.contains("1 / 1"),
+            "{}x{} counter missing: {:?}",
+            w,
+            h,
+            row
+        );
+    }
+}
+
+#[test]
+fn paper_white_chrome_survives_emoji_heading_at_multiple_widths() {
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# 🎉 Party\n").unwrap();
+    let slide = &deck.slides[0];
+
+    for cols in [40u16, 80, 120] {
+        let area = Rect::new(0, 0, cols, 24);
+        let mut buf = Buffer::empty(area);
+        render_slide(slide, 0, 1, area, &mut buf, &theme);
+
+        let (inner, _) = compute_inner_area(area, &theme);
+        let rule_y = 22;
+        for x in inner.x..inner.x + inner.width {
+            assert_eq!(
+                buf[(x, rule_y)].symbol(),
+                "─",
+                "cols={} rule missing at x={}",
+                cols,
+                x
+            );
+        }
+        let counter_row = row_string(&buf, 23);
+        assert!(
+            counter_row.contains("1 / 1"),
+            "cols={} counter missing: {:?}",
+            cols,
+            counter_row
+        );
+    }
+}
+
+#[test]
+fn paper_white_code_block_border_uses_chrome_dim_style() {
+    let area = Rect::new(0, 0, 80, 10);
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("```\nfoo\n```\n").unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    // Find the first `─` above the chrome area (chrome starts at area.height-2).
+    let chrome_rule_y = area.height - 2;
+    let mut found = None;
+    for y in 0..chrome_rule_y {
+        let row = row_string(&buf, y);
+        if let Some(pos) = row.find('─') {
+            found = Some((pos as u16, y));
+            break;
+        }
+    }
+    let (x, y) = found.expect("code block top border rendered above chrome");
+    assert_eq!(buf[(x, y)].fg, theme.chrome_dim.fg.unwrap());
+}
+
+#[test]
+fn paper_white_inline_link_cell_is_blue_and_underlined() {
+    use ratatui::style::{Color, Modifier};
+
+    let area = Rect::new(0, 0, 80, 10);
+    let theme = Theme::paper_white();
+    // Heading + tab-indented body cell so the link lives in a rendered cell.
+    let deck = oxlide::parse_deck("# T\n\n\tSee [click](https://example.com) now.\n").unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    let (y, row) = find_row(&buf, "click").expect("link rendered");
+    let x = row.find("click").unwrap() as u16;
+    let cell = &buf[(x, y)];
+    assert_eq!(cell.fg, Color::Blue);
+    assert!(cell.modifier.contains(Modifier::UNDERLINED));
+}
+
+#[test]
+fn paper_white_inline_code_cell_is_dark_gray() {
+    use ratatui::style::Color;
+
+    let area = Rect::new(0, 0, 80, 10);
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# T\n\n\tUse `bit` here.\n").unwrap();
+    let mut buf = Buffer::empty(area);
+    render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+
+    let (y, row) = find_row(&buf, "bit").expect("inline code rendered");
+    let x = row.find("bit").unwrap() as u16;
+    assert_eq!(buf[(x, y)].fg, Color::DarkGray);
+}
+
+#[test]
+fn paper_white_narrow_chrome_does_not_panic() {
+    // Height 2 → max_chrome = 2/3 = 0 → chrome clamped to 0. Height 4 →
+    // max_chrome = 1, chrome_rows clamps to min(2, 1) = 1. Exercise both.
+    let theme = Theme::paper_white();
+    let deck = oxlide::parse_deck("# T\n").unwrap();
+    for (w, h) in [(40u16, 2u16), (40, 4), (1, 1)] {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        render_slide(&deck.slides[0], 0, 1, area, &mut buf, &theme);
+    }
 }

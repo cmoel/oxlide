@@ -137,9 +137,10 @@ fn event_loop(terminal: &mut Tui, mut app: App) -> Result<()> {
             let area = frame.area();
             let buf = frame.buffer_mut();
             let slide = &app.deck.slides[app.current_slide];
+            let total = app.deck.slides.len();
             let theme = registry::get(app.current_theme)
                 .expect("registry invariant: current_theme must be registered");
-            render_slide(slide, area, buf, &theme);
+            render_slide(slide, app.current_slide, total, area, buf, &theme);
         })?;
 
         if event::poll(Duration::from_millis(100))? {

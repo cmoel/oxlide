@@ -37,10 +37,12 @@ pub fn compute_inner_area(outer: Rect, theme: &Theme) -> (Rect, Rect) {
         width: inner_width,
         height: inner_height,
     };
+    // Chrome inherits inner horizontal extent so rules + counters align with
+    // content at every width.
     let chrome = Rect {
-        x: outer.x,
+        x: outer.x + pad_x,
         y: outer.y + inner_height,
-        width: outer.width,
+        width: inner_width,
         height: chrome_rows,
     };
     (inner, chrome)
@@ -198,8 +200,12 @@ mod tests {
         assert_eq!(inner.width, 102);
         assert_eq!(inner.x + inner.width - 1, 110);
         assert_eq!(inner.y, 0);
-        assert_eq!(inner.height, 40);
-        assert_eq!(chrome.height, 0);
+        // Paper-white reserves 2 chrome rows by default.
+        assert_eq!(inner.height, 38);
+        assert_eq!(chrome.height, 2);
+        // Chrome shares inner's horizontal extent so rules align with content.
+        assert_eq!(chrome.x, inner.x);
+        assert_eq!(chrome.width, inner.width);
     }
 
     #[test]
@@ -246,11 +252,12 @@ mod tests {
     }
 
     #[test]
-    fn default_theme_reserves_no_chrome() {
+    fn paper_white_reserves_two_chrome_rows() {
         let theme = Theme::paper_white();
         let (inner, chrome) = compute_inner_area(Rect::new(0, 0, 80, 24), &theme);
-        assert_eq!(inner.height, 24);
-        assert_eq!(chrome.height, 0);
+        assert_eq!(inner.height, 22);
+        assert_eq!(chrome.height, 2);
+        assert_eq!(chrome.y, inner.y + inner.height);
     }
 
     #[test]

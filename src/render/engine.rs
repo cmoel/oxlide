@@ -1,5 +1,5 @@
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
@@ -7,14 +7,22 @@ use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
 use crate::layout::layout;
 use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide};
 use crate::render::composition::{compute_inner_area, is_hero_slide, render_hero};
-use crate::render::theme::Theme;
+use crate::render::theme::{ChromeSpec, Theme};
 
-pub fn render_slide(slide: &Slide, area: Rect, buf: &mut Buffer, theme: &Theme) {
-    if slide.cells.is_empty() || area.width == 0 || area.height == 0 {
+pub fn render_slide(
+    slide: &Slide,
+    slide_idx: usize,
+    total: usize,
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-    let (inner, _chrome) = compute_inner_area(area, theme);
-    if inner.width == 0 || inner.height == 0 {
+    let (inner, chrome_area) = compute_inner_area(area, theme);
+    render_chrome(theme.chrome, chrome_area, slide_idx, total, theme, buf);
+    if slide.cells.is_empty() || inner.width == 0 || inner.height == 0 {
         return;
     }
     if is_hero_slide(slide) {
@@ -24,6 +32,51 @@ pub fn render_slide(slide: &Slide, area: Rect, buf: &mut Buffer, theme: &Theme) 
     let rects = layout(slide, inner);
     for (cell, rect) in slide.cells.iter().zip(rects) {
         render_cell(cell, rect, buf, theme);
+    }
+}
+
+fn render_chrome(
+    spec: ChromeSpec,
+    chrome_area: Rect,
+    slide_idx: usize,
+    total: usize,
+    theme: &Theme,
+    buf: &mut Buffer,
+) {
+    if chrome_area.width == 0 || chrome_area.height == 0 {
+        return;
+    }
+    match spec {
+        ChromeSpec::None => {}
+        ChromeSpec::BottomRule => {
+            let rule_rect = Rect {
+                x: chrome_area.x,
+                y: chrome_area.y,
+                width: chrome_area.width,
+                height: 1,
+            };
+            let rule = "─".repeat(chrome_area.width as usize);
+            Paragraph::new(rule)
+                .style(theme.chrome_dim)
+                .render(rule_rect, buf);
+
+            if chrome_area.height >= 2 {
+                let counter_rect = Rect {
+                    x: chrome_area.x,
+                    y: chrome_area.y + 1,
+                    width: chrome_area.width,
+                    height: 1,
+                };
+                // ratatui's Alignment::Center is unicode-width aware — no
+                // manual cell math needed regardless of heading content or
+                // terminal width.
+                let counter = format!("{} / {}", slide_idx + 1, total);
+                Paragraph::new(counter)
+                    .style(theme.chrome_dim)
+                    .alignment(Alignment::Center)
+                    .render(counter_rect, buf);
+            }
+        }
     }
 }
 
@@ -86,10 +139,9 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
 }
 
 fn render_code(_lang: &Option<String>, source: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
-    let border_style = theme.prose.add_modifier(ratatui::style::Modifier::DIM);
     let block = WidgetBlock::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(border_style);
+        .border_style(theme.chrome_dim);
     let inner = block.inner(area);
     block.render(area, buf);
 
@@ -338,16 +390,16 @@ mod tests {
         let slide = slide_with_cell(vec![heading(1, "Hello")]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(text.contains("Hello"), "buffer should contain heading text; got {:?}", text);
 
-        let expected = theme.heading[0];
+        // Paper-white headings carry weight (bold), not color — fg falls
+        // through to the terminal default (Color::Reset).
         let (x, y) = find_char_position(&buf, "Hello").expect("heading rendered");
         let cell = &buf[(x, y)];
         assert_eq!(cell.symbol(), "H");
-        assert_eq!(cell.fg, expected.fg.unwrap());
         assert!(cell.modifier.contains(Modifier::BOLD));
     }
 
@@ -365,7 +417,7 @@ mod tests {
         let slide = slide_with_cell(vec![paragraph(spans)]);
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(text.contains("plain"));
@@ -395,7 +447,7 @@ mod tests {
         ]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(text.contains("Title"));
@@ -421,7 +473,7 @@ mod tests {
         let slide = slide_with_cell(vec![paragraph(spans)]);
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         let link_x = row.find("click").expect("link text on first row") as u16;
@@ -436,7 +488,7 @@ mod tests {
         let slide = slide_with_cell(vec![]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
     }
 
     #[test]
@@ -445,7 +497,7 @@ mod tests {
         let slide = slide_with_cell(vec![heading(1, "Hello")]);
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
     }
 
     fn list_item(blocks: Vec<Block>) -> ListItem {
@@ -474,7 +526,7 @@ mod tests {
         let slide = slide_with_cell(vec![list(false, vec![])]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
     }
 
     #[test]
@@ -491,7 +543,7 @@ mod tests {
         let slide = slide_with_cell(vec![block]);
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
@@ -519,7 +571,7 @@ mod tests {
         let slide = slide_with_cell(vec![block]);
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
@@ -545,7 +597,7 @@ mod tests {
         let slide = slide_with_cell(vec![block]);
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let r0 = row_at(&buf, 0);
         let r1 = row_at(&buf, 1);
@@ -581,7 +633,7 @@ mod tests {
         let slide = slide_with_cell(vec![block]);
         let area = Rect::new(0, 0, 60, 3);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let row = row_at(&buf, 0);
         assert!(row.contains("bold"), "row: {:?}", row);
@@ -616,9 +668,10 @@ mod tests {
         let theme = Theme::paper_white();
         let src = "fn main() {\n    println!(\"hi\");\n}";
         let slide = slide_with_cell(vec![code_block(src)]);
-        let area = Rect::new(0, 0, 40, 6);
+        // Need top+bottom borders + 3 code rows + 2 chrome rows = 7.
+        let area = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let find_row = |needle: &str| -> Option<(u16, String)> {
             (0..buf.area.height).find_map(|y| {
@@ -653,7 +706,7 @@ mod tests {
         let slide = slide_with_cell(vec![code_block("x")]);
         let area = Rect::new(0, 0, 20, 3);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         let bottom: String = (0..buf.area.width)
@@ -670,7 +723,7 @@ mod tests {
         let slide = slide_with_cell(vec![code_block(&long)]);
         let area = Rect::new(0, 0, 20, 4);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let rows: Vec<String> = (0..buf.area.height)
             .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
@@ -685,7 +738,7 @@ mod tests {
         let slide = slide_with_cell(vec![code_block("")]);
         let area = Rect::new(0, 0, 20, 4);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(top.contains("─"), "frame should render even with empty source");
@@ -703,7 +756,7 @@ mod tests {
         let slide = slide_with_cell(vec![image]);
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(text.contains("a cat"), "alt text missing; got {:?}", text);
@@ -745,7 +798,7 @@ mod tests {
         let slide = slide_with_cell(vec![image]);
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
         assert!(text.contains("cat.png"), "src missing; got {:?}", text);
@@ -764,7 +817,7 @@ mod tests {
         let slide = slide_with_cell(vec![image]);
         let area = Rect::new(0, 0, 4, 3);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
     }
 
     #[test]
@@ -781,7 +834,7 @@ mod tests {
         let slide = slide_with_cell(vec![paragraph(spans)]);
         let area = Rect::new(0, 0, 60, 4);
         let mut buf = Buffer::empty(area);
-        render_slide(&slide, area, &mut buf, &theme);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(row.contains("[img: cat]"), "row was {:?}", row);
