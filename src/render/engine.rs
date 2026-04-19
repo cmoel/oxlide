@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn renders_heading_text_with_heading_style() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![heading(1, "Hello")]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn renders_paragraph_text_with_inline_styles() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let spans = vec![
             InlineSpan::Text("plain ".into()),
             InlineSpan::Strong(vec![InlineSpan::Text("bold".into())]),
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn renders_heading_and_paragraph_stacked() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         // Hero slide ([H1, P]) renders heading centered with one blank row and
         // the subtitle below. Body must still appear after heading.
         let slide = slide_with_cell(vec![
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn renders_link_with_link_style() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let spans = vec![InlineSpan::Link {
             url: "https://example.com".into(),
             text: vec![InlineSpan::Text("click".into())],
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn empty_cell_does_not_panic() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn zero_size_area_does_not_panic() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![heading(1, "Hello")]);
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(area);
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn empty_list_does_not_panic() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![list(false, vec![])]);
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn renders_unordered_list_with_bullet_markers() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let block = list(
             false,
             vec![
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn renders_ordered_list_with_numbered_markers() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let block = list(
             true,
             vec![
@@ -535,7 +535,7 @@ mod tests {
 
     #[test]
     fn renders_nested_list_indented() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let inner = list(false, vec![simple_item("inner")]);
         let outer_item = list_item(vec![
             paragraph(vec![InlineSpan::Text("outer".into())]),
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn renders_list_items_with_inline_styles() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let spans = vec![
             InlineSpan::Strong(vec![InlineSpan::Text("bold".into())]),
             InlineSpan::Text(" ".into()),
@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn renders_code_block_preserving_whitespace() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let src = "fn main() {\n    println!(\"hi\");\n}";
         let slide = slide_with_cell(vec![code_block(src)]);
         let area = Rect::new(0, 0, 40, 6);
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn code_block_has_visible_frame() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![code_block("x")]);
         let area = Rect::new(0, 0, 20, 3);
         let mut buf = Buffer::empty(area);
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn code_block_clips_long_lines_without_wrapping() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let long = "a".repeat(80);
         let slide = slide_with_cell(vec![code_block(&long)]);
         let area = Rect::new(0, 0, 20, 4);
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn empty_code_block_does_not_panic() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_with_cell(vec![code_block("")]);
         let area = Rect::new(0, 0, 20, 4);
         let mut buf = Buffer::empty(area);
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn renders_image_block_with_alt_and_src() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let image = Block::Image {
             src: "cat.png".into(),
             alt: "a cat".into(),
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn renders_image_block_with_empty_alt() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let image = Block::Image {
             src: "cat.png".into(),
             alt: String::new(),
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn narrow_image_area_does_not_panic() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let image = Block::Image {
             src: "cat.png".into(),
             alt: "a cat".into(),
@@ -769,7 +769,7 @@ mod tests {
 
     #[test]
     fn inline_image_span_renders_placeholder() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let spans = vec![
             InlineSpan::Text("before ".into()),
             InlineSpan::Image {

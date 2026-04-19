@@ -112,7 +112,7 @@ fn every_fixture_renders() {
         dir.display()
     );
 
-    let theme = Theme::default();
+    let theme = Theme::paper_white();
     let area = Rect::new(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
 
     let mut failures: Vec<String> = Vec::new();
@@ -181,7 +181,7 @@ fn every_fixture_renders() {
 
 fn render_to_buffer(source: &str, area: Rect) -> Buffer {
     let deck = oxlide::parse_deck(source).expect("fixture parses");
-    let theme = Theme::default();
+    let theme = Theme::paper_white();
     let mut buf = Buffer::empty(area);
     let slide = deck.slides.first().expect("at least one slide");
     render_slide(slide, area, &mut buf, &theme);
@@ -206,7 +206,7 @@ fn find_row(buf: &Buffer, needle: &str) -> Option<(u16, String)> {
 fn padding_at_120_cols_matches_acceptance_range() {
     // Acceptance: 120 cols → content x-range is [9..=110].
     let area = Rect::new(0, 0, 120, 40);
-    let (inner, _) = compute_inner_area(area, &Theme::default());
+    let (inner, _) = compute_inner_area(area, &Theme::paper_white());
     assert_eq!(inner.x, 9);
     assert_eq!(inner.x + inner.width - 1, 110);
 }
@@ -214,7 +214,7 @@ fn padding_at_120_cols_matches_acceptance_range() {
 #[test]
 fn chrome_rows_zero_is_a_noop() {
     let area = Rect::new(0, 0, 120, 40);
-    let theme = Theme::default();
+    let theme = Theme::paper_white();
     assert_eq!(theme.chrome_rows, 0, "default theme reserves no chrome");
     let (inner, chrome) = compute_inner_area(area, &theme);
     assert_eq!(inner.height, 40);
@@ -319,7 +319,7 @@ fn emoji_heading_horizontally_centered_at_40_80_120() {
         let (_, row) = find_row(&buf, "🎉").expect("emoji in buffer");
         let start = row.find("🎉").unwrap();
 
-        let (inner, _) = compute_inner_area(area, &Theme::default());
+        let (inner, _) = compute_inner_area(area, &Theme::paper_white());
         let left_offset = start as u16 - inner.x;
         let trailing = inner.width - left_offset - expected_width as u16;
         // Centered within the inner area. Off-by-one tolerated for odd splits.
@@ -364,7 +364,7 @@ fn same_slide_rerendered_at_different_sizes_stays_correct() {
     let source = "# Resize\n";
     let deck = oxlide::parse_deck(source).unwrap();
     let slide = &deck.slides[0];
-    let theme = Theme::default();
+    let theme = Theme::paper_white();
 
     let a1 = Rect::new(0, 0, 40, 20);
     let mut buf1 = Buffer::empty(a1);
@@ -402,7 +402,7 @@ fn render_at_40x20_after_80x40_is_independent() {
     let source = "# Sticky\n";
     let deck = oxlide::parse_deck(source).unwrap();
     let slide = &deck.slides[0];
-    let theme = Theme::default();
+    let theme = Theme::paper_white();
 
     let big = Rect::new(0, 0, 80, 40);
     let mut big_buf = Buffer::empty(big);

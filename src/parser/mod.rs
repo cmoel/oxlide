@@ -233,15 +233,17 @@ mod tests {
 
     #[test]
     fn fixture_directive_on_slide() {
+        // Directive at the top of the file is captured as deck-level.
         let src = include_str!("fixtures/directive-on-slide.md");
         let d = deck(src);
         assert_eq!(d.slides.len(), 1);
-        assert_eq!(d.slides[0].directives.len(), 1);
-        assert_eq!(super::directive_name(&d.slides[0].directives[0]), "fx");
+        assert_eq!(d.directives.len(), 1);
+        assert_eq!(super::directive_name(&d.directives[0]), "fx");
         assert_eq!(
-            super::directive_args(&d.slides[0].directives[0]),
+            super::directive_args(&d.directives[0]),
             "fade duration=300"
         );
+        assert!(d.slides[0].directives.is_empty());
         for cell in &d.slides[0].cells {
             assert!(cell.directives.is_empty());
         }
@@ -273,18 +275,19 @@ mod tests {
     fn fixture_directive_empty_args() {
         let src = include_str!("fixtures/directive-empty-args.md");
         let d = deck(src);
-        assert_eq!(d.slides[0].directives.len(), 1);
-        assert_eq!(super::directive_name(&d.slides[0].directives[0]), "fx");
-        assert_eq!(super::directive_args(&d.slides[0].directives[0]), "");
+        assert_eq!(d.directives.len(), 1);
+        assert_eq!(super::directive_name(&d.directives[0]), "fx");
+        assert_eq!(super::directive_args(&d.directives[0]), "");
     }
 
     #[test]
     fn fixture_directive_multiple_in_source_order() {
         let src = include_str!("fixtures/directive-multiple.md");
         let d = deck(src);
-        let all: Vec<&Directive> = d.slides[0]
+        let all: Vec<&Directive> = d
             .directives
             .iter()
+            .chain(d.slides[0].directives.iter())
             .chain(d.slides[0].cells.iter().flat_map(|c| c.directives.iter()))
             .collect();
         assert_eq!(all.len(), 2);
@@ -316,9 +319,10 @@ mod tests {
     fn fixture_directive_whitespace_tolerance() {
         let src = include_str!("fixtures/directive-whitespace-tolerance.md");
         let d = deck(src);
-        let all: Vec<&Directive> = d.slides[0]
+        let all: Vec<&Directive> = d
             .directives
             .iter()
+            .chain(d.slides[0].directives.iter())
             .chain(d.slides[0].cells.iter().flat_map(|c| c.directives.iter()))
             .collect();
         assert_eq!(all.len(), 2);
@@ -332,19 +336,19 @@ mod tests {
     fn fixture_directive_with_hyphens() {
         let src = include_str!("fixtures/directive-with-hyphens.md");
         let d = deck(src);
-        assert_eq!(d.slides[0].directives.len(), 1);
+        assert_eq!(d.directives.len(), 1);
         assert_eq!(
-            super::directive_name(&d.slides[0].directives[0]),
+            super::directive_name(&d.directives[0]),
             "image-meta-disable"
         );
-        assert_eq!(super::directive_args(&d.slides[0].directives[0]), "true");
+        assert_eq!(super::directive_args(&d.directives[0]), "true");
     }
 
     #[test]
     fn directive_span_points_into_original_source() {
         let src = "<!-- oxlide-fx: fade -->\n\n# Slide";
         let d = deck(src);
-        let dir = &d.slides[0].directives[0];
+        let dir = &d.directives[0];
         let Directive::Raw { span, .. } = dir;
         let slice = &src[span.start..span.end];
         assert!(

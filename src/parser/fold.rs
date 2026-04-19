@@ -280,6 +280,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
     let mut slides: Vec<Slide> = Vec::new();
     let mut pending_cell_directives: Vec<Directive> = Vec::new();
     let mut pending_slide_directives: Vec<Directive> = Vec::new();
+    let mut deck_directives: Vec<Directive> = Vec::new();
     let mut pending_cell_break = false;
 
     for (event, range) in parser.into_offset_iter() {
@@ -366,6 +367,11 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                         };
                         if !stack.is_empty() || !current_cell_blocks.is_empty() {
                             pending_cell_directives.push(directive);
+                        } else if current_slide_cells.is_empty()
+                            && current_slide_notes.is_empty()
+                            && slides.is_empty()
+                        {
+                            deck_directives.push(directive);
                         } else {
                             pending_slide_directives.push(directive);
                         }
@@ -653,6 +659,7 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
 
     Ok(SlideDeck {
         slides,
+        directives: deck_directives,
         source: String::new(),
     })
 }
@@ -783,6 +790,37 @@ mod tests {
             deck.slides[0].cells[2].blocks[0],
             Block::List { .. }
         ));
+    }
+
+    #[test]
+    fn deck_level_directive_captured_on_deck() {
+        let deck = fold_source("<!-- oxlide-theme: amber -->\n\n# Slide");
+        assert_eq!(deck.directives.len(), 1);
+        let Directive::Raw { name, args, .. } = &deck.directives[0];
+        assert_eq!(name, "theme");
+        assert_eq!(args, "amber");
+        assert!(deck.slides[0].directives.is_empty());
+    }
+
+    #[test]
+    fn no_leading_directives_means_empty_deck_directives() {
+        let deck = fold_source("# Slide");
+        assert!(deck.directives.is_empty());
+    }
+
+    #[test]
+    fn directive_on_slide_two_stays_on_slide_not_deck() {
+        let deck = fold_source("# A\n\n---\n\n<!-- oxlide-theme: amber -->\n\n# B");
+        assert!(deck.directives.is_empty());
+        assert_eq!(deck.slides[1].directives.len(), 1);
+    }
+
+    #[test]
+    fn multiple_leading_directives_all_captured_on_deck() {
+        let deck = fold_source(
+            "<!-- oxlide-theme: amber -->\n<!-- oxlide-fx: fade -->\n\n# Slide",
+        );
+        assert_eq!(deck.directives.len(), 2);
     }
 
     #[test]

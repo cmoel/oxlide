@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn padding_at_120_is_8_percent_clamped() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let outer = Rect::new(0, 0, 120, 40);
         let (inner, chrome) = compute_inner_area(outer, &theme);
         // 120 * 8 / 100 = 9, clamp(3,12) = 9. content x range = [9..=110].
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn padding_clamp_low_at_40() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         // 40 * 8 / 100 = 3, clamp(3,12) = 3.
         let (inner, _) = compute_inner_area(Rect::new(0, 0, 40, 10), &theme);
         assert_eq!(inner.x, 3);
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn padding_at_80_cols() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         // 80 * 8 / 100 = 6, clamp(3,12) = 6.
         let (inner, _) = compute_inner_area(Rect::new(0, 0, 80, 24), &theme);
         assert_eq!(inner.x, 6);
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn padding_clamp_high_at_200() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         // 200 * 8 / 100 = 16, clamp(3,12) = 12.
         let (inner, _) = compute_inner_area(Rect::new(0, 0, 200, 40), &theme);
         assert_eq!(inner.x, 12);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn narrow_fallback_disables_padding_below_20() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let (inner, _) = compute_inner_area(Rect::new(0, 0, 15, 8), &theme);
         assert_eq!(inner.x, 0);
         assert_eq!(inner.width, 15);
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn boundary_exactly_20_cols_applies_padding() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let (inner, _) = compute_inner_area(Rect::new(0, 0, 20, 8), &theme);
         assert_eq!(inner.x, 3);
         assert_eq!(inner.width, 14);
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn default_theme_reserves_no_chrome() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let (inner, chrome) = compute_inner_area(Rect::new(0, 0, 80, 24), &theme);
         assert_eq!(inner.height, 24);
         assert_eq!(chrome.height, 0);
@@ -257,7 +257,7 @@ mod tests {
     fn chrome_rows_reduce_inner_height() {
         let theme = Theme {
             chrome_rows: 2,
-            ..Theme::default()
+            ..Theme::paper_white()
         };
         let (inner, chrome) = compute_inner_area(Rect::new(0, 0, 80, 24), &theme);
         assert_eq!(inner.height, 22);
@@ -269,7 +269,7 @@ mod tests {
     fn chrome_rows_clamped_to_one_third_of_height() {
         let theme = Theme {
             chrome_rows: 100,
-            ..Theme::default()
+            ..Theme::paper_white()
         };
         let (inner, chrome) = compute_inner_area(Rect::new(0, 0, 80, 30), &theme);
         // height / 3 = 10
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn honors_nonzero_outer_origin() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let (inner, _) = compute_inner_area(Rect::new(5, 7, 80, 24), &theme);
         // pad_x = 6, so inner.x = 5 + 6 = 11.
         assert_eq!(inner.x, 11);
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn zero_area_is_safe() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let (inner, chrome) = compute_inner_area(Rect::new(0, 0, 0, 0), &theme);
         assert_eq!(inner.width, 0);
         assert_eq!(inner.height, 0);
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn render_hero_centers_vertically_on_short_content() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_of(vec![cell_of(vec![heading_block(1, "Hello")])]);
         let area = Rect::new(0, 0, 80, 24);
         let (inner, _) = compute_inner_area(area, &theme);
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn render_hero_anchors_top_when_short() {
-        let theme = Theme::default();
+        let theme = Theme::paper_white();
         let slide = slide_of(vec![cell_of(vec![heading_block(1, "Hi")])]);
         let area = Rect::new(0, 0, 40, 4);
         let (inner, _) = compute_inner_area(area, &theme);

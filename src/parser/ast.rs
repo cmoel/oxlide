@@ -127,6 +127,7 @@ pub struct Slide {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlideDeck {
     pub slides: Vec<Slide>,
+    pub directives: Vec<Directive>,
     pub source: String,
 }
 

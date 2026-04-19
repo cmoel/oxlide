@@ -5,6 +5,6 @@ use oxlide::present::run_present;
 
 fn main() -> Result<()> {
     match parse_and_resolve() {
-        ResolvedCommand::Present(path) => run_present(&path),
+        ResolvedCommand::Present { path, theme } => run_present(&path, theme),
     }
 }
