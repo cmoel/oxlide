@@ -1,5 +1,6 @@
 pub mod composition;
 pub mod engine;
+pub mod text;
 pub mod theme;
 
 pub use composition::{compute_inner_area, is_hero_slide};

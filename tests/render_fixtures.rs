@@ -73,6 +73,9 @@ fn collect_block_words(blocks: &[Block], out: &mut Vec<String>) {
             Block::CodeBlock { source, .. } => {
                 push_words(source, out);
             }
+            Block::Qr { url, .. } => {
+                push_words(url, out);
+            }
         }
     }
 }

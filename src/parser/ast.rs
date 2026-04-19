@@ -86,6 +86,10 @@ pub enum Block {
         source: String,
         span: SourceSpan,
     },
+    Qr {
+        url: String,
+        span: SourceSpan,
+    },
 }
 
 impl Block {
@@ -96,6 +100,7 @@ impl Block {
             Block::List { span, .. } => *span,
             Block::Image { span, .. } => *span,
             Block::CodeBlock { span, .. } => *span,
+            Block::Qr { span, .. } => *span,
         }
     }
 }

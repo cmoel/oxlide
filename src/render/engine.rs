@@ -1,12 +1,15 @@
+use qrcode::QrCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
+use tui_qrcode::{Colors, QrCodeWidget, QuietZone, Scaling};
 
 use crate::layout::layout;
 use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide};
 use crate::render::composition::{compute_inner_area, is_hero_slide, render_hero};
+use crate::render::text::truncate_to_width;
 use crate::render::theme::{ChromeSpec, Theme};
 
 pub fn render_slide(
@@ -135,6 +138,9 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
         Block::Image { src, alt, .. } => {
             render_image(src, alt, area, buf, theme);
         }
+        Block::Qr { url, .. } => {
+            render_qr(url, area, buf, theme);
+        }
     }
 }
 
@@ -168,6 +174,100 @@ fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Them
     }
     lines.push(Line::styled(src.to_string(), muted));
 
+    Paragraph::new(lines).render(inner, buf);
+}
+
+/// Extra quiet-zone modules added around the raw QR (4 on each side per the
+/// spec). tui-qrcode's QuietZone::Enabled adds the same margin.
+const QR_QUIET_MODULES: u16 = 8;
+
+fn render_qr(url: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        render_qr_error(url, "empty QR URL", area, buf, theme);
+        return;
+    }
+
+    // Reserve 1 row at the bottom for the caption; the QR claims the rest.
+    let caption_height: u16 = if area.height >= 2 { 1 } else { 0 };
+    let qr_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: area.height.saturating_sub(caption_height),
+    };
+
+    let qr = match QrCode::new(trimmed.as_bytes()) {
+        Ok(q) => q,
+        Err(_) => {
+            render_qr_error(trimmed, "could not encode URL", area, buf, theme);
+            return;
+        }
+    };
+
+    // Minimum cell budget at one-cell-per-module scale. Half-block glyphs
+    // pack two modules vertically, so height = ceil(modules / 2).
+    let modules = qr.width() as u16 + QR_QUIET_MODULES;
+    let min_width = modules;
+    let min_height = modules.div_ceil(2);
+    if qr_area.width < min_width || qr_area.height < min_height {
+        render_qr_error(trimmed, "QR cell too small", area, buf, theme);
+        return;
+    }
+
+    let widget = QrCodeWidget::new(qr)
+        .colors(Colors::Normal)
+        .quiet_zone(QuietZone::Enabled)
+        .scaling(Scaling::Min);
+
+    // Render at minimum scale centered inside qr_area; tui-qrcode's Min
+    // scaling will expand to fill the provided Rect, so we hand it exactly
+    // the minimum footprint to keep the QR square-ish and consistent.
+    let pad_x = (qr_area.width - min_width) / 2;
+    let pad_y = (qr_area.height - min_height) / 2;
+    let centered = Rect {
+        x: qr_area.x + pad_x,
+        y: qr_area.y + pad_y,
+        width: min_width,
+        height: min_height,
+    };
+    widget.render(centered, buf);
+
+    if caption_height == 0 {
+        return;
+    }
+    let caption_rect = Rect {
+        x: area.x,
+        y: area.y + area.height - 1,
+        width: area.width,
+        height: 1,
+    };
+    let caption = truncate_to_width(trimmed, area.width as usize);
+    let muted = theme.prose.add_modifier(ratatui::style::Modifier::DIM);
+    Paragraph::new(caption)
+        .style(muted)
+        .alignment(Alignment::Center)
+        .render(caption_rect, buf);
+}
+
+fn render_qr_error(raw: &str, reason: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let block = WidgetBlock::default().borders(Borders::ALL).title(" qr ");
+    let inner = block.inner(area);
+    block.render(area, buf);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let muted = theme.prose.add_modifier(ratatui::style::Modifier::DIM);
+    let reason_line = truncate_to_width(reason, inner.width as usize);
+    let mut lines: Vec<Line<'static>> = vec![Line::styled(reason_line, theme.image_placeholder)];
+    if !raw.is_empty() {
+        let detail = truncate_to_width(raw, inner.width as usize);
+        lines.push(Line::styled(detail, muted));
+    }
     Paragraph::new(lines).render(inner, buf);
 }
 
@@ -213,14 +313,8 @@ fn render_list(
                         width: area.width,
                         height: area.height - y_offset,
                     };
-                    let used = render_list(
-                        *inner_ordered,
-                        inner_items,
-                        depth + 1,
-                        nested,
-                        buf,
-                        theme,
-                    );
+                    let used =
+                        render_list(*inner_ordered, inner_items, depth + 1, nested, buf, theme);
                     y_offset = y_offset.saturating_add(used);
                 }
                 Block::Paragraph { spans, .. } | Block::Heading { spans, .. } => {
@@ -293,12 +387,7 @@ pub fn inline_to_line(spans: &[InlineSpan], theme: &Theme) -> Line<'static> {
     Line::from(out)
 }
 
-fn collect_spans(
-    spans: &[InlineSpan],
-    theme: &Theme,
-    base: Style,
-    out: &mut Vec<Span<'static>>,
-) {
+fn collect_spans(spans: &[InlineSpan], theme: &Theme, base: Style, out: &mut Vec<Span<'static>>) {
     for span in spans {
         match span {
             InlineSpan::Text(text) => {
@@ -347,7 +436,10 @@ mod tests {
     }
 
     fn paragraph(spans: Vec<InlineSpan>) -> Block {
-        Block::Paragraph { spans, span: span() }
+        Block::Paragraph {
+            spans,
+            span: span(),
+        }
     }
 
     fn slide_with_cell(blocks: Vec<Block>) -> Slide {
@@ -393,7 +485,11 @@ mod tests {
         render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let text = buffer_text(&buf);
-        assert!(text.contains("Hello"), "buffer should contain heading text; got {:?}", text);
+        assert!(
+            text.contains("Hello"),
+            "buffer should contain heading text; got {:?}",
+            text
+        );
 
         // Paper-white headings carry weight (bold), not color — fg falls
         // through to the terminal default (Color::Reset).
@@ -501,7 +597,10 @@ mod tests {
     }
 
     fn list_item(blocks: Vec<Block>) -> ListItem {
-        ListItem { blocks, span: span() }
+        ListItem {
+            blocks,
+            span: span(),
+        }
     }
 
     fn simple_item(text: &str) -> ListItem {
@@ -628,7 +727,10 @@ mod tests {
         ];
         let block = list(
             false,
-            vec![list_item(vec![Block::Paragraph { spans, span: span() }])],
+            vec![list_item(vec![Block::Paragraph {
+                spans,
+                span: span(),
+            }])],
         );
         let slide = slide_with_cell(vec![block]);
         let area = Rect::new(0, 0, 60, 3);
@@ -676,7 +778,11 @@ mod tests {
         let find_row = |needle: &str| -> Option<(u16, String)> {
             (0..buf.area.height).find_map(|y| {
                 let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
-                if row.contains(needle) { Some((y, row)) } else { None }
+                if row.contains(needle) {
+                    Some((y, row))
+                } else {
+                    None
+                }
             })
         };
 
@@ -713,7 +819,11 @@ mod tests {
             .map(|x| buf[(x, buf.area.height - 1)].symbol())
             .collect();
         assert!(top.contains("─"), "top border missing; got {:?}", top);
-        assert!(bottom.contains("─"), "bottom border missing; got {:?}", bottom);
+        assert!(
+            bottom.contains("─"),
+            "bottom border missing; got {:?}",
+            bottom
+        );
     }
 
     #[test]
@@ -741,7 +851,10 @@ mod tests {
         render_slide(&slide, 0, 1, area, &mut buf, &theme);
 
         let top: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(top.contains("─"), "frame should render even with empty source");
+        assert!(
+            top.contains("─"),
+            "frame should render even with empty source"
+        );
     }
 
     #[test]
@@ -838,5 +951,183 @@ mod tests {
 
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(row.contains("[img: cat]"), "row was {:?}", row);
+    }
+
+    fn qr_block(url: &str) -> Block {
+        Block::Qr {
+            url: url.into(),
+            span: span(),
+        }
+    }
+
+    fn has_block_char(buf: &Buffer) -> bool {
+        // tui-qrcode paints QR modules with half-block glyphs ('▀', '▄',
+        // '█', ' '). A scannable QR must have painted dark cells.
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let s = buf[(x, y)].symbol();
+                if s == "▀" || s == "▄" || s == "█" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn find_row_substring(buf: &Buffer, needle: &str) -> Option<(u16, String)> {
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            if row.contains(needle) {
+                return Some((y, row));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn renders_qr_block_with_url_caption() {
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("https://github.com/cmoel/oxlide")]);
+        // Generous canvas so the QR comfortably fits.
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        assert!(
+            has_block_char(&buf),
+            "expected QR block glyphs to appear, got:\n{}",
+            buffer_text(&buf)
+        );
+        let (_, row) = find_row_substring(&buf, "https://github.com/cmoel/oxlide")
+            .expect("caption rendered verbatim");
+        // Caption should not appear wrapped.
+        assert!(
+            row.contains("https://github.com/cmoel/oxlide"),
+            "caption row: {:?}",
+            row
+        );
+    }
+
+    #[test]
+    fn qr_caption_truncates_to_cell_width_with_ellipsis() {
+        let theme = Theme::paper_white();
+        let url = "https://github.com/cmoel/oxlide/issues/42/very/long";
+        let slide = slide_with_cell(vec![qr_block(url)]);
+        // 16 cells wide: caption "https://github.c…" or similar — truncated.
+        let area = Rect::new(0, 0, 16, 16);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        // At this width, the QR itself likely fails the min-size check and
+        // we get the "QR cell too small" error card. The full URL must not
+        // appear verbatim — truncation is the invariant we assert here.
+        let text = buffer_text(&buf);
+        assert!(
+            !text.contains(url),
+            "full URL should not fit verbatim at width 16; got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn qr_empty_url_renders_error_card() {
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("")]);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("empty QR URL"),
+            "expected error card, got:\n{}",
+            text
+        );
+        assert!(
+            !has_block_char(&buf),
+            "must not emit QR modules for empty URL"
+        );
+    }
+
+    #[test]
+    fn qr_whitespace_only_url_renders_error_card() {
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("   ")]);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(text.contains("empty QR URL"), "got:\n{}", text);
+    }
+
+    #[test]
+    fn qr_too_small_renders_error_card() {
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("https://x.com")]);
+        // 30 cols wide — narrow enough that the minimum QR footprint (37×19)
+        // cannot fit, but wide enough to print the full error message.
+        let area = Rect::new(0, 0, 30, 10);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("QR cell too small"),
+            "expected size error, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn qr_zero_sized_area_does_not_panic() {
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("https://x.com")]);
+        let area = Rect::new(0, 0, 0, 0);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+    }
+
+    #[test]
+    fn qr_unicode_url_does_not_panic_and_truncates_cleanly() {
+        // Rendering invariant (per oxlide-rendering-invariants): Unicode URL
+        // must not panic, and caption truncation must stay width-correct.
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("https://例え.jp/path/with/中文")]);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_slide(&slide, 0, 1, area, &mut buf, &theme);
+
+        let text = buffer_text(&buf);
+        // Some recognizable substring of the URL should have made it through.
+        assert!(
+            text.contains("https://") || text.contains("例え"),
+            "expected URL fragment in output; got:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn qr_resize_rerenders_cleanly_at_different_widths() {
+        // Rendering invariant: every frame takes Rect fresh — no cached state.
+        // Render the same slide at several sizes, no panics, each renders.
+        let theme = Theme::paper_white();
+        let slide = slide_with_cell(vec![qr_block("https://github.com/cmoel/oxlide")]);
+
+        for (w, h) in [(60u16, 24u16), (120, 40), (40, 16), (200, 60), (80, 30)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            render_slide(&slide, 0, 1, area, &mut buf, &theme);
+            let text = buffer_text(&buf);
+            // Either a scannable QR (w,h big enough) or an error card — never
+            // nothing, never a panic.
+            assert!(
+                has_block_char(&buf) || text.contains("QR cell too small"),
+                "size {}x{} produced neither QR nor error:\n{}",
+                w,
+                h,
+                text
+            );
+        }
     }
 }

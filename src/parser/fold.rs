@@ -37,6 +37,7 @@ fn is_internal_sentinel(name: &str) -> bool {
             | "image-meta"
             | "slide-break"
             | "cell-break"
+            | "qr"
     )
 }
 
@@ -354,6 +355,41 @@ pub fn fold(prepass_out: &PrepassOutput) -> Result<SlideDeck, ParseError> {
                             *meta = Some(parsed);
                             if let Some(entry) = entry_containing(range.start, entries) {
                                 span.end = entry.orig_end;
+                            }
+                        }
+                    } else if name == "qr" {
+                        // Only emit at block scope (between paragraphs). Inline
+                        // use inside a paragraph is not supported for v1.
+                        if stack.is_empty() {
+                            let is_deck_level = current_cell_blocks.is_empty()
+                                && current_slide_cells.is_empty()
+                                && current_slide_notes.is_empty()
+                                && slides.is_empty();
+                            if is_deck_level {
+                                eprintln!(
+                                    "oxlide: deck-level oxlide-qr directive ignored; place it inside a slide or cell"
+                                );
+                            } else {
+                                if pending_cell_break {
+                                    flush_cell(
+                                        &mut current_cell_blocks,
+                                        &mut current_slide_cells,
+                                        &mut pending_cell_directives,
+                                    );
+                                    pending_cell_break = false;
+                                }
+                                let block = Block::Qr {
+                                    url: args,
+                                    span: SourceSpan {
+                                        start: map(range.start),
+                                        end: map(range.end),
+                                    },
+                                };
+                                if matches!(target_stack.last(), Some(BlockTarget::Notes)) {
+                                    current_slide_notes.push(block);
+                                } else {
+                                    current_cell_blocks.push(block);
+                                }
                             }
                         }
                     } else if !is_internal_sentinel(&name) {
@@ -841,5 +877,84 @@ mod tests {
             deck.slides[0].cells[0].blocks[2],
             Block::List { .. }
         ));
+    }
+
+    #[test]
+    fn qr_directive_becomes_qr_block_with_url() {
+        let deck = fold_source("# Slide\n\n<!-- oxlide-qr: https://x.com -->");
+        let qr = deck.slides[0]
+            .cells
+            .iter()
+            .flat_map(|c| &c.blocks)
+            .find(|b| matches!(b, Block::Qr { .. }))
+            .expect("expected a Block::Qr");
+        match qr {
+            Block::Qr { url, .. } => assert_eq!(url, "https://x.com"),
+            _ => unreachable!(),
+        }
+        // Shouldn't leak into the directive list at any level.
+        assert!(deck.directives.is_empty());
+        for slide in &deck.slides {
+            assert!(slide.directives.is_empty());
+            for cell in &slide.cells {
+                assert!(cell.directives.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn qr_directive_with_empty_args_still_emits_qr_block() {
+        let deck = fold_source("# Slide\n\n<!-- oxlide-qr: -->");
+        let qr = deck.slides[0]
+            .cells
+            .iter()
+            .flat_map(|c| &c.blocks)
+            .find(|b| matches!(b, Block::Qr { .. }))
+            .expect("expected a Block::Qr even with empty URL");
+        match qr {
+            Block::Qr { url, .. } => assert_eq!(url, ""),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn qr_directive_trims_surrounding_whitespace() {
+        let deck = fold_source("# Slide\n\n<!-- oxlide-qr:   https://x.com   -->");
+        let qr = deck.slides[0]
+            .cells
+            .iter()
+            .flat_map(|c| &c.blocks)
+            .find(|b| matches!(b, Block::Qr { .. }))
+            .expect("expected a Block::Qr");
+        match qr {
+            Block::Qr { url, .. } => assert_eq!(url, "https://x.com"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn qr_directive_with_cell_break_lands_in_its_own_cell() {
+        // Single blank line between heading and qr → two cells.
+        let deck = fold_source("# Slide\n\n<!-- oxlide-qr: https://x.com -->");
+        assert_eq!(deck.slides[0].cells.len(), 2);
+        assert!(matches!(
+            deck.slides[0].cells[1].blocks[0],
+            Block::Qr { .. }
+        ));
+    }
+
+    #[test]
+    fn deck_level_qr_directive_is_dropped() {
+        // Before any slide content — deck-level QR should not emit a block
+        // and must not leak as a Directive either.
+        let deck = fold_source("<!-- oxlide-qr: https://x.com -->\n\n# Slide");
+        assert!(deck.directives.is_empty());
+        let has_qr = deck
+            .slides
+            .iter()
+            .flat_map(|s| &s.cells)
+            .flat_map(|c| &c.blocks)
+            .any(|b| matches!(b, Block::Qr { .. }));
+        assert!(!has_qr, "deck-level qr directive must not emit a block");
     }
 }

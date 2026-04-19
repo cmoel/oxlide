@@ -8,6 +8,7 @@ pub(crate) const MIN_COL_WIDTH: u16 = 40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CellType {
     Image,
+    Qr,
     Code,
     List,
     Prose,
@@ -18,7 +19,7 @@ pub(crate) enum CellType {
 impl CellType {
     fn rank(self) -> u8 {
         match self {
-            CellType::Image => 5,
+            CellType::Image | CellType::Qr => 5,
             CellType::Code => 4,
             CellType::List | CellType::Prose | CellType::Heading => 3,
             CellType::Empty => 0,
@@ -34,6 +35,7 @@ pub(crate) fn cell_type(cell: &Cell) -> CellType {
     for block in &cell.blocks {
         match block {
             Block::Image { .. } => return CellType::Image,
+            Block::Qr { .. } => return CellType::Qr,
             Block::CodeBlock { .. } => has_code = true,
             Block::List { .. } => has_list = true,
             Block::Paragraph { .. } => has_prose = true,
