@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{self, Stdout};
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -12,9 +12,10 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui_image::picker::Picker;
 
 use crate::parser::{SlideDeck, parse_deck};
-use crate::render::render_slide;
+use crate::render::{RenderContext, render_slide_with};
 use crate::render::theme::{registry, theme_from_deck};
 use crate::wake::PresentationLock;
 
@@ -24,18 +25,22 @@ const DEFAULT_THEME: &str = "paper-white";
 
 struct App {
     deck: SlideDeck,
+    deck_dir: Option<PathBuf>,
     current_slide: usize,
     should_quit: bool,
     current_theme: &'static str,
+    picker: Option<Picker>,
 }
 
 impl App {
     fn new(deck: SlideDeck, current_theme: &'static str) -> Self {
         Self {
             deck,
+            deck_dir: None,
             current_slide: 0,
             should_quit: false,
             current_theme,
+            picker: None,
         }
     }
 
@@ -95,7 +100,20 @@ pub fn run_present(path: &Path, theme_override: Option<String>) -> Result<()> {
     let mut terminal =
         Terminal::new(CrosstermBackend::new(stdout)).context("creating terminal")?;
 
-    let result = event_loop(&mut terminal, App::new(deck, theme_name));
+    // Detect the terminal's image protocol once. Per ratatui-image docs this
+    // must happen after entering the alternate screen but before reading
+    // events. On failure (headless test env, terminal that doesn't respond
+    // to capability queries), fall through to halfblocks rendering. Either
+    // way, image rendering must never block startup.
+    let picker = Picker::from_query_stdio()
+        .ok()
+        .or_else(|| Some(Picker::halfblocks()));
+
+    let mut app = App::new(deck, theme_name);
+    app.deck_dir = path.parent().map(Path::to_path_buf);
+    app.picker = picker;
+
+    let result = event_loop(&mut terminal, app);
 
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
@@ -140,7 +158,12 @@ fn event_loop(terminal: &mut Tui, mut app: App) -> Result<()> {
             let total = app.deck.slides.len();
             let theme = registry::get(app.current_theme)
                 .expect("registry invariant: current_theme must be registered");
-            render_slide(slide, app.current_slide, total, area, buf, &theme);
+            let ctx = RenderContext {
+                theme: &theme,
+                deck_dir: app.deck_dir.as_deref(),
+                picker: app.picker.as_ref(),
+            };
+            render_slide_with(slide, app.current_slide, total, area, buf, &ctx);
         })?;
 
         if event::poll(Duration::from_millis(100))? {

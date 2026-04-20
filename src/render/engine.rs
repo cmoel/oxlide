@@ -1,9 +1,13 @@
+use std::path::{Path, PathBuf};
+
 use qrcode::QrCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as WidgetBlock, Borders, Paragraph, Widget, Wrap};
+use ratatui_image::picker::Picker;
+use ratatui_image::{Image, Resize};
 use tui_qrcode::{Colors, QrCodeWidget, QuietZone, Scaling};
 
 use crate::layout::layout;
@@ -11,6 +15,30 @@ use crate::parser::{Block, Cell, InlineSpan, ListItem, Slide};
 use crate::render::composition::{compute_inner_area, is_hero_slide, render_hero};
 use crate::render::text::truncate_to_width;
 use crate::render::theme::{ChromeSpec, Theme};
+
+/// Per-render context: the active theme, the deck file's parent directory
+/// (used to resolve relative asset paths like `![alt](pics/foo.png)`), and
+/// the terminal-detected `Picker` used to encode images. Built fresh each
+/// frame by the caller — the picker itself is a one-time terminal capability
+/// detection (not a dimension cache, so it does not violate the resize
+/// invariant).
+pub struct RenderContext<'a> {
+    pub theme: &'a Theme,
+    pub deck_dir: Option<&'a Path>,
+    pub picker: Option<&'a Picker>,
+}
+
+impl<'a> RenderContext<'a> {
+    /// Build a context with only a theme — used by tests and any caller that
+    /// doesn't need image support. Image blocks fall back to the placeholder.
+    pub fn from_theme(theme: &'a Theme) -> Self {
+        Self {
+            theme,
+            deck_dir: None,
+            picker: None,
+        }
+    }
+}
 
 pub fn render_slide(
     slide: &Slide,
@@ -20,21 +48,36 @@ pub fn render_slide(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
+    let ctx = RenderContext::from_theme(theme);
+    render_slide_with(slide, slide_idx, total, area, buf, &ctx);
+}
+
+/// Render a slide with full context (deck directory + picker). Used by
+/// present-mode so image blocks can resolve relative paths and encode via
+/// the terminal's preferred graphics protocol.
+pub fn render_slide_with(
+    slide: &Slide,
+    slide_idx: usize,
+    total: usize,
+    area: Rect,
+    buf: &mut Buffer,
+    ctx: &RenderContext<'_>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (inner, chrome_area) = compute_inner_area(area, theme);
-    render_chrome(theme.chrome, chrome_area, slide_idx, total, theme, buf);
+    let (inner, chrome_area) = compute_inner_area(area, ctx.theme);
+    render_chrome(ctx.theme.chrome, chrome_area, slide_idx, total, ctx.theme, buf);
     if slide.cells.is_empty() || inner.width == 0 || inner.height == 0 {
         return;
     }
     if is_hero_slide(slide) {
-        render_hero(slide, inner, buf, theme);
+        render_hero(slide, inner, buf, ctx.theme);
         return;
     }
     let rects = layout(slide, inner);
     for (cell, rect) in slide.cells.iter().zip(rects) {
-        render_cell(cell, rect, buf, theme);
+        render_cell_with(cell, rect, buf, ctx);
     }
 }
 
@@ -84,6 +127,11 @@ fn render_chrome(
 }
 
 pub fn render_cell(cell: &Cell, area: Rect, buf: &mut Buffer, theme: &Theme) {
+    let ctx = RenderContext::from_theme(theme);
+    render_cell_with(cell, area, buf, &ctx);
+}
+
+fn render_cell_with(cell: &Cell, area: Rect, buf: &mut Buffer, ctx: &RenderContext<'_>) {
     if cell.blocks.is_empty() || area.width == 0 || area.height == 0 {
         return;
     }
@@ -109,12 +157,13 @@ pub fn render_cell(cell: &Cell, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let rects = Layout::vertical(constraints).split(area);
     for (entry, rect) in entries.iter().zip(rects.iter()) {
         if let Some(i) = entry {
-            render_block(&cell.blocks[*i], *rect, buf, theme);
+            render_block(&cell.blocks[*i], *rect, buf, ctx);
         }
     }
 }
 
-fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
+fn render_block(block: &Block, area: Rect, buf: &mut Buffer, ctx: &RenderContext<'_>) {
+    let theme = ctx.theme;
     match block {
         Block::Heading { level, spans, .. } => {
             let idx = (level.saturating_sub(1) as usize).min(5);
@@ -136,7 +185,7 @@ fn render_block(block: &Block, area: Rect, buf: &mut Buffer, theme: &Theme) {
             render_code(lang, source, area, buf, theme);
         }
         Block::Image { src, alt, .. } => {
-            render_image(src, alt, area, buf, theme);
+            render_image(src, alt, area, buf, ctx);
         }
         Block::Qr { url, .. } => {
             render_qr(url, area, buf, theme);
@@ -160,7 +209,56 @@ fn render_code(_lang: &Option<String>, source: &str, area: Rect, buf: &mut Buffe
         .render(inner, buf);
 }
 
-fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
+fn render_image(src: &str, alt: &str, area: Rect, buf: &mut Buffer, ctx: &RenderContext<'_>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    if try_render_image(src, area, buf, ctx).is_none() {
+        render_image_placeholder(src, alt, area, buf, ctx.theme);
+    }
+}
+
+/// Resolve a markdown image `src` to a filesystem path. Absolute paths are
+/// honored as-is; relative paths are joined onto the deck file's parent
+/// directory if known. With no deck dir (e.g. tests), the relative path is
+/// returned unchanged — `image::ImageReader::open` will then fail and the
+/// caller will fall back to the placeholder.
+pub(crate) fn resolve_image_path(src: &str, deck_dir: Option<&Path>) -> PathBuf {
+    let p = Path::new(src);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else if let Some(dir) = deck_dir {
+        dir.join(p)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Try to decode and render the image. Returns `None` on any failure —
+/// missing file, decode error, no picker available, encoder error — so the
+/// caller can fall back to the textual placeholder.
+fn try_render_image(
+    src: &str,
+    area: Rect,
+    buf: &mut Buffer,
+    ctx: &RenderContext<'_>,
+) -> Option<()> {
+    let picker = ctx.picker?;
+    let path = resolve_image_path(src, ctx.deck_dir);
+
+    let dyn_img = image::ImageReader::open(&path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+
+    let protocol = picker.new_protocol(dyn_img, area, Resize::Fit(None)).ok()?;
+    Image::new(&protocol).render(area, buf);
+    Some(())
+}
+
+fn render_image_placeholder(src: &str, alt: &str, area: Rect, buf: &mut Buffer, theme: &Theme) {
     let block = WidgetBlock::default()
         .borders(Borders::ALL)
         .title(" image ");
@@ -931,6 +1029,111 @@ mod tests {
         let area = Rect::new(0, 0, 4, 3);
         let mut buf = Buffer::empty(area);
         render_slide(&slide, 0, 1, area, &mut buf, &theme);
+    }
+
+    // ----- image path resolution + missing-asset fallback -----
+
+    #[test]
+    fn resolve_image_path_honors_absolute_paths() {
+        // Absolute paths must not be re-rooted under the deck dir.
+        let deck_dir = Path::new("/tmp/deck");
+        let abs = if cfg!(windows) { r"C:\img\cat.png" } else { "/img/cat.png" };
+        let resolved = resolve_image_path(abs, Some(deck_dir));
+        assert_eq!(resolved, Path::new(abs));
+    }
+
+    #[test]
+    fn resolve_image_path_joins_relative_to_deck_dir() {
+        let deck_dir = Path::new("/tmp/deck");
+        let resolved = resolve_image_path("pics/cat.png", Some(deck_dir));
+        assert_eq!(resolved, Path::new("/tmp/deck/pics/cat.png"));
+    }
+
+    #[test]
+    fn resolve_image_path_returns_relative_unchanged_when_no_deck_dir() {
+        // Without a deck dir, we can't resolve — let the open() call fail and
+        // fall through to the placeholder.
+        let resolved = resolve_image_path("pics/cat.png", None);
+        assert_eq!(resolved, Path::new("pics/cat.png"));
+    }
+
+    #[test]
+    fn resolve_image_path_handles_emoji_filename() {
+        // Per oxlide rendering invariants: multi-byte characters in any path
+        // segment must round-trip through Path without corruption.
+        let deck_dir = Path::new("/tmp/deck");
+        let resolved = resolve_image_path("party-🎉.png", Some(deck_dir));
+        assert_eq!(resolved, Path::new("/tmp/deck/party-🎉.png"));
+    }
+
+    #[test]
+    fn resolve_image_path_handles_cjk_filename() {
+        let deck_dir = Path::new("/tmp/deck");
+        let resolved = resolve_image_path("写真/猫.png", Some(deck_dir));
+        assert_eq!(resolved, Path::new("/tmp/deck/写真/猫.png"));
+    }
+
+    #[test]
+    fn missing_image_with_picker_renders_placeholder_not_panic() {
+        // Even when a Picker is available, a missing source file must fall
+        // through to the textual placeholder — never a panic, never a crash.
+        let theme = Theme::paper_white();
+        let picker = Picker::halfblocks();
+        let ctx = RenderContext {
+            theme: &theme,
+            deck_dir: Some(Path::new("/nonexistent/deck/dir")),
+            picker: Some(&picker),
+        };
+        let slide = slide_with_cell(vec![Block::Image {
+            src: "no-such-image.png".into(),
+            alt: "missing".into(),
+            meta: None,
+            span: span(),
+        }]);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_slide_with(&slide, 0, 1, area, &mut buf, &ctx);
+
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("missing"),
+            "alt text should appear in placeholder; got {:?}",
+            text
+        );
+        assert!(
+            text.contains("no-such-image.png"),
+            "src should appear in placeholder; got {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn missing_image_resize_rerenders_cleanly_at_different_widths() {
+        // Per oxlide rendering invariants: every render takes Rect fresh, no
+        // cached state. Render the same image slide at several sizes — must
+        // never panic, must always show the placeholder (file doesn't exist).
+        let theme = Theme::paper_white();
+        let picker = Picker::halfblocks();
+        let ctx = RenderContext {
+            theme: &theme,
+            deck_dir: Some(Path::new("/nonexistent/deck/dir")),
+            picker: Some(&picker),
+        };
+        let slide = slide_with_cell(vec![Block::Image {
+            src: "no-such-image.png".into(),
+            alt: "missing".into(),
+            meta: None,
+            span: span(),
+        }]);
+
+        for (w, h) in [(60u16, 24u16), (120, 40), (40, 16), (200, 60), (8, 4)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            render_slide_with(&slide, 0, 1, area, &mut buf, &ctx);
+            // Either the placeholder rendered (alt appears) or the area was
+            // too narrow to fit any text. Never a panic, never a crash.
+            let _ = buffer_text(&buf);
+        }
     }
 
     #[test]
